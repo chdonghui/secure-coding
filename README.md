@@ -12,7 +12,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `1.2`
+- 현재 버전: `1.3`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
 - 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)

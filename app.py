@@ -26,6 +26,10 @@ PRODUCT_DESCRIPTION_MIN_LENGTH = 1
 PRODUCT_DESCRIPTION_MAX_LENGTH = 2000
 PRODUCT_MIN_PRICE = 0
 PRODUCT_MAX_PRICE = 1_000_000_000
+REPORT_REASON_MIN_LENGTH = 10
+REPORT_REASON_MAX_LENGTH = 1000
+MAX_REPORTS_PER_WINDOW = 5
+REPORT_RATE_WINDOW_SECONDS = 60 * 60
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
@@ -216,6 +220,329 @@ def migrate_product_schema(cursor):
     cursor.execute('DROP TABLE product_legacy_v1')
 
 
+def create_report_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS report (
+            id TEXT PRIMARY KEY,
+            reporter_id TEXT NOT NULL,
+            target_type TEXT NOT NULL
+                CHECK(target_type IN ('user', 'product')),
+            target_user_id TEXT,
+            target_product_id TEXT,
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {REPORT_REASON_MIN_LENGTH} AND {REPORT_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(
+                (
+                    target_type = 'user'
+                    AND target_user_id IS NOT NULL
+                    AND target_product_id IS NULL
+                    AND reporter_id <> target_user_id
+                )
+                OR
+                (
+                    target_type = 'product'
+                    AND target_user_id IS NULL
+                    AND target_product_id IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (reporter_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_user_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_product_id)
+                REFERENCES product(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def create_report_audit_table(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS report_audit_log (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL
+                CHECK(event_type IN ('report_created', 'report_migrated')),
+            actor_id TEXT NOT NULL,
+            target_type TEXT NOT NULL
+                CHECK(target_type IN ('user', 'product')),
+            target_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (actor_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def ensure_report_schema_objects(cursor):
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS report_unique_user_target
+        ON report (reporter_id, target_user_id)
+        WHERE target_type = 'user'
+    """)
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS report_unique_product_target
+        ON report (reporter_id, target_product_id)
+        WHERE target_type = 'product'
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS report_reporter_created_at
+        ON report (reporter_id, created_at)
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS prevent_report_rate_limit_bypass
+        BEFORE INSERT ON report
+        WHEN (
+            SELECT COUNT(*)
+            FROM report
+            WHERE reporter_id = NEW.reporter_id
+                AND created_at >= NEW.created_at - {REPORT_RATE_WINDOW_SECONDS}
+        ) >= {MAX_REPORTS_PER_WINDOW}
+        BEGIN
+            SELECT RAISE(ABORT, 'report rate limit exceeded');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_duplicate_report_insert
+        BEFORE INSERT ON report
+        WHEN EXISTS (
+            SELECT 1
+            FROM report
+            WHERE reporter_id = NEW.reporter_id
+                AND (
+                    (
+                        NEW.target_type = 'user'
+                        AND target_user_id = NEW.target_user_id
+                    )
+                    OR
+                    (
+                        NEW.target_type = 'product'
+                        AND target_product_id = NEW.target_product_id
+                    )
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'duplicate report');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_own_product_report_insert
+        BEFORE INSERT ON report
+        WHEN NEW.target_type = 'product'
+            AND EXISTS (
+                SELECT 1
+                FROM product
+                WHERE id = NEW.target_product_id
+                    AND seller_id = NEW.reporter_id
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid report target');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_own_product_report_update
+        BEFORE UPDATE ON report
+        WHEN NEW.target_type = 'product'
+            AND EXISTS (
+                SELECT 1
+                FROM product
+                WHERE id = NEW.target_product_id
+                    AND seller_id = NEW.reporter_id
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid report target');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_report_audit_log_update
+        BEFORE UPDATE ON report_audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'report audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_report_audit_log_delete
+        BEFORE DELETE ON report_audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'report audit log is append-only');
+        END
+    """)
+
+
+def report_schema_is_current(cursor):
+    columns = {
+        row['name']
+        for row in cursor.execute('PRAGMA table_info(report)').fetchall()
+    }
+    required_columns = {
+        'id',
+        'reporter_id',
+        'target_type',
+        'target_user_id',
+        'target_product_id',
+        'reason',
+        'created_at',
+    }
+    foreign_keys = cursor.execute('PRAGMA foreign_key_list(report)').fetchall()
+    required_foreign_keys = {
+        ('reporter_id', 'user'),
+        ('target_user_id', 'user'),
+        ('target_product_id', 'product'),
+    }
+    actual_foreign_keys = {
+        (row['from'], row['table'])
+        for row in foreign_keys
+    }
+    schema_row = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'report'"
+    ).fetchone()
+    normalized_schema = ''.join(
+        (schema_row['sql'] if schema_row else '').split()
+    ).lower()
+    required_constraints = (
+        (
+            'check(length(trim(reason))between'
+            f'{REPORT_REASON_MIN_LENGTH}and{REPORT_REASON_MAX_LENGTH})'
+        )
+        in normalized_schema
+        and 'check(instr(reason,char(0))=0)' in normalized_schema
+        and "check(target_typein('user','product'))" in normalized_schema
+    )
+    return (
+        required_columns <= columns
+        and required_foreign_keys <= actual_foreign_keys
+        and required_constraints
+    )
+
+
+def add_report_audit_log(
+    cursor,
+    event_type,
+    actor_id,
+    target_type,
+    target_id,
+    created_at,
+):
+    cursor.execute(
+        '''
+        INSERT INTO report_audit_log (
+            id, event_type, actor_id, target_type, target_id, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            str(uuid.uuid4()),
+            event_type,
+            actor_id,
+            target_type,
+            target_id,
+            created_at,
+        ),
+    )
+
+
+def migrate_report_schema(cursor):
+    if report_schema_is_current(cursor):
+        ensure_report_schema_objects(cursor)
+        return
+
+    reports = cursor.execute(
+        'SELECT id, reporter_id, target_id, reason FROM report'
+    ).fetchall()
+    migrated_reports = []
+    seen_targets = set()
+    migration_time = int(time.time())
+    for report_row in reports:
+        try:
+            report_id = str(uuid.UUID(report_row['id']))
+            target_id = str(uuid.UUID(report_row['target_id']))
+        except (ValueError, AttributeError):
+            raise RuntimeError(
+                '기존 신고 데이터에 올바르지 않은 UUID가 포함되어 있습니다.'
+            ) from None
+
+        reporter = cursor.execute(
+            'SELECT id FROM user WHERE id = ?',
+            (report_row['reporter_id'],),
+        ).fetchone()
+        target_user = cursor.execute(
+            'SELECT id FROM user WHERE id = ?',
+            (target_id,),
+        ).fetchone()
+        target_product = cursor.execute(
+            'SELECT id, seller_id FROM product WHERE id = ?',
+            (target_id,),
+        ).fetchone()
+        reason, reason_error = validate_report_reason(report_row['reason'])
+        target_count = int(target_user is not None) + int(target_product is not None)
+        invalid_self_target = (
+            target_user is not None
+            and target_user['id'] == report_row['reporter_id']
+        ) or (
+            target_product is not None
+            and target_product['seller_id'] == report_row['reporter_id']
+        )
+        if (
+            reporter is None
+            or target_count != 1
+            or invalid_self_target
+            or reason_error
+        ):
+            raise RuntimeError(
+                f'기존 신고 {report_id}을 안전한 스키마로 변환할 수 없습니다.'
+            )
+
+        target_type = 'user' if target_user is not None else 'product'
+        unique_target = (report_row['reporter_id'], target_type, target_id)
+        if unique_target in seen_targets:
+            raise RuntimeError(
+                '기존 신고 데이터에 중복 신고가 포함되어 있습니다.'
+            )
+        seen_targets.add(unique_target)
+        migrated_reports.append(
+            (
+                report_id,
+                report_row['reporter_id'],
+                target_type,
+                target_id if target_type == 'user' else None,
+                target_id if target_type == 'product' else None,
+                reason,
+                migration_time,
+            )
+        )
+
+    cursor.execute('ALTER TABLE report RENAME TO report_legacy_v1')
+    create_report_table(cursor)
+    cursor.executemany(
+        '''
+        INSERT INTO report (
+            id,
+            reporter_id,
+            target_type,
+            target_user_id,
+            target_product_id,
+            reason,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''',
+        migrated_reports,
+    )
+    for migrated_report in migrated_reports:
+        target_type = migrated_report[2]
+        target_id = migrated_report[3] or migrated_report[4]
+        add_report_audit_log(
+            cursor,
+            'report_migrated',
+            migrated_report[1],
+            target_type,
+            target_id,
+            migration_time,
+        )
+    cursor.execute('DROP TABLE report_legacy_v1')
+    ensure_report_schema_objects(cursor)
+
+
 # 테이블 생성 (최초 실행 시에만)
 def init_db():
     with app.app_context():
@@ -234,18 +561,13 @@ def init_db():
         """)
         # 상품 테이블 생성
         create_product_table(cursor)
-        # 신고 테이블 생성
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS report (
-                id TEXT PRIMARY KEY,
-                reporter_id TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                reason TEXT NOT NULL
-            )
-        """)
         add_user_security_columns(cursor)
         migrate_plaintext_passwords(cursor)
         migrate_product_schema(cursor)
+        # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
+        create_report_table(cursor)
+        create_report_audit_table(cursor)
+        migrate_report_schema(cursor)
         db.commit()
 
 
@@ -332,6 +654,76 @@ def validate_product_input(raw_title, raw_description, raw_price):
             f'{PRODUCT_MAX_PRICE:,}원 이하여야 합니다.'
         )
     return title, description, price, None
+
+
+def validate_report_reason(raw_reason):
+    reason = unicodedata.normalize(
+        'NFKC',
+        raw_reason.replace('\r\n', '\n').replace('\r', '\n').strip(),
+    )
+    if not REPORT_REASON_MIN_LENGTH <= len(reason) <= REPORT_REASON_MAX_LENGTH:
+        return None, (
+            f'신고 사유는 {REPORT_REASON_MIN_LENGTH}~'
+            f'{REPORT_REASON_MAX_LENGTH}자여야 합니다.'
+        )
+    if any(
+        unicodedata.category(character).startswith('C')
+        and character not in {'\n', '\t'}
+        for character in reason
+    ):
+        return None, '신고 사유에 허용되지 않는 문자가 포함되어 있습니다.'
+    return reason, None
+
+
+def validate_report_input(
+    raw_target_type,
+    raw_target_id,
+    raw_reason,
+    reporter_id,
+    db,
+):
+    target_type = raw_target_type.strip().lower()
+    if target_type not in {'user', 'product'}:
+        return None, '신고 대상을 확인해주세요.'
+
+    target_id_text = raw_target_id.strip()
+    try:
+        target_id = str(uuid.UUID(target_id_text))
+    except (ValueError, AttributeError):
+        return None, '신고 대상을 확인해주세요.'
+    if len(target_id_text) != 36 or target_id != target_id_text.lower():
+        return None, '신고 대상을 확인해주세요.'
+
+    reason, reason_error = validate_report_reason(raw_reason)
+    if reason_error:
+        return None, reason_error
+
+    target_user_id = None
+    target_product_id = None
+    if target_type == 'user':
+        target_user = db.execute(
+            'SELECT id FROM user WHERE id = ?',
+            (target_id,),
+        ).fetchone()
+        if target_user is None or target_user['id'] == reporter_id:
+            return None, '신고 대상을 확인해주세요.'
+        target_user_id = target_id
+    else:
+        target_product = db.execute(
+            'SELECT id, seller_id FROM product WHERE id = ?',
+            (target_id,),
+        ).fetchone()
+        if target_product is None or target_product['seller_id'] == reporter_id:
+            return None, '신고 대상을 확인해주세요.'
+        target_product_id = target_id
+
+    return {
+        'target_type': target_type,
+        'target_id': target_id,
+        'target_user_id': target_user_id,
+        'target_product_id': target_product_id,
+        'reason': reason,
+    }, None
 
 
 def generate_csrf_token():
@@ -722,14 +1114,20 @@ def delete_product(product_id):
     require_product_owner(product)
 
     db = get_db()
-    cursor = db.execute(
-        'DELETE FROM product WHERE id = ? AND seller_id = ?',
-        (product['id'], g.current_user['id']),
-    )
-    if cursor.rowcount != 1:
+    try:
+        cursor = db.execute(
+            'DELETE FROM product WHERE id = ? AND seller_id = ?',
+            (product['id'], g.current_user['id']),
+        )
+        if cursor.rowcount != 1:
+            db.rollback()
+            abort(404)
+        db.commit()
+    except sqlite3.IntegrityError:
         db.rollback()
-        abort(404)
-    db.commit()
+        flash('현재 상품을 삭제할 수 없습니다.')
+        return redirect(url_for('view_product', product_id=product['id']))
+
     flash('상품이 삭제되었습니다.')
     return redirect(url_for('dashboard'))
 
@@ -739,19 +1137,105 @@ def delete_product(product_id):
 @login_required
 def report():
     if request.method == 'POST':
-        target_id = request.form['target_id']
-        reason = request.form['reason']
-        db = get_db()
-        cursor = db.cursor()
-        report_id = str(uuid.uuid4())
+        return report_post()
+    return render_template('report.html')
+
+
+@csrf_protected
+def report_post():
+    db = get_db()
+    report_data, validation_error = validate_report_input(
+        request.form.get('target_type', ''),
+        request.form.get('target_id', ''),
+        request.form.get('reason', ''),
+        g.current_user['id'],
+        db,
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('report'))
+
+    now = int(time.time())
+    report_count = db.execute(
+        '''
+        SELECT COUNT(*)
+        FROM report
+        WHERE reporter_id = ? AND created_at >= ?
+        ''',
+        (
+            g.current_user['id'],
+            now - REPORT_RATE_WINDOW_SECONDS,
+        ),
+    ).fetchone()[0]
+    if report_count >= MAX_REPORTS_PER_WINDOW:
+        abort(429)
+
+    if report_data['target_type'] == 'user':
+        duplicate_report = db.execute(
+            '''
+            SELECT 1
+            FROM report
+            WHERE reporter_id = ? AND target_user_id = ?
+            ''',
+            (g.current_user['id'], report_data['target_user_id']),
+        ).fetchone()
+    else:
+        duplicate_report = db.execute(
+            '''
+            SELECT 1
+            FROM report
+            WHERE reporter_id = ? AND target_product_id = ?
+            ''',
+            (g.current_user['id'], report_data['target_product_id']),
+        ).fetchone()
+    if duplicate_report is not None:
+        abort(429)
+
+    cursor = db.cursor()
+    try:
         cursor.execute(
-            "INSERT INTO report (id, reporter_id, target_id, reason) VALUES (?, ?, ?, ?)",
-            (report_id, session['user_id'], target_id, reason)
+            '''
+            INSERT INTO report (
+                id,
+                reporter_id,
+                target_type,
+                target_user_id,
+                target_product_id,
+                reason,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                g.current_user['id'],
+                report_data['target_type'],
+                report_data['target_user_id'],
+                report_data['target_product_id'],
+                report_data['reason'],
+                now,
+            ),
+        )
+        add_report_audit_log(
+            cursor,
+            'report_created',
+            g.current_user['id'],
+            report_data['target_type'],
+            report_data['target_id'],
+            now,
         )
         db.commit()
-        flash('신고가 접수되었습니다.')
-        return redirect(url_for('dashboard'))
-    return render_template('report.html')
+    except sqlite3.IntegrityError as error:
+        db.rollback()
+        if str(error) in {
+            'duplicate report',
+            'report rate limit exceeded',
+        }:
+            abort(429)
+        abort(400)
+
+    flash('신고가 접수되었습니다.')
+    return redirect(url_for('dashboard'))
 
 # 실시간 채팅: 클라이언트가 메시지를 보내면 전체 브로드캐스트
 @socketio.on('send_message')
