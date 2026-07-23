@@ -16,6 +16,7 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `1.4` | `2026-07-24` | 신고 시도 제한·실패 감사·개인정보 차단과 DB 백업 검증 | 자동 테스트 88개 통과 |
 | `1.3` | `2026-07-24` | 신고 접수 검증, 남용 방지, 참조 무결성 및 감사 로그 | 자동 테스트 72개 통과 |
 | `1.2` | `2026-07-24` | 상품 등록·수정·삭제, 소유권 및 상품 데이터 무결성 강화 | 자동 테스트 45개 통과 |
 | `1.1` | `2026-07-24` | 회원가입, 로그인, 세션 및 프로필 보안 강화 | 자동 테스트 18개 통과 |
@@ -27,6 +28,147 @@
 - ⚠️: 일부 방어만 존재하거나 후속 개선 필요
 - ❌: 해당 버전에서 미적용
 - N/A: 해당 버전에 기능이 없음
+
+---
+
+## Version 1.4
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `1.4` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | 신고 시도 제한, 실패 감사, 개인정보 최소화, DB 백업·복구 검증 |
+| 테스트 | 기존 보안 테스트, `tests/test_report_security.py`, `tests/test_database_backup.py` |
+| 테스트 결과 | `88 passed` |
+
+### 조치 전후 요약
+
+| 항목 | Version 1.3 | Version 1.4 |
+|---|---|---|
+| IP 신고 제한 | ❌ 사용자 성공 건수만 제한 | ✅ HMAC IP별 1시간 20회 시도 제한 |
+| 사용자 시도 제한 | ⚠️ 성공 신고만 1시간 5건 제한 | ✅ 성공 제한에 더해 사용자별 1시간 10회 시도 제한 |
+| 프록시 IP 신뢰 | ❌ 명시적 정책 없음 | ✅ 기본 전달 헤더 미신뢰, 신뢰 프록시 수 명시 설정 |
+| 실패 감사 | ❌ 성공·마이그레이션만 기록 | ✅ 검증·개인정보·중복·사용자/IP 제한 실패 기록 |
+| IP 로그 | ❌ 없음 | ✅ 원문 대신 비밀키 기반 HMAC-SHA256만 기록 |
+| 개인정보 입력 | ⚠️ 안내·탐지 없음 | ✅ 이메일·전화번호·주민등록번호 패턴 저장 차단 |
+| DB 백업 | ⚠️ 수동 파일 복사 | ✅ SQLite Backup API, 무결성·외래키·권한 검증 |
+| 복구 검증 | ❌ 절차 없음 | ✅ 실행 DB를 덮어쓰지 않는 새 파일 복구 검증 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드 근거 |
+|---|---|---|---|
+| `V1.4-RATE-01` | IP 시도 제한 | IP별 1시간 최대 20회 신고 POST 시도 허용 | `consume_report_rate_limit`, `report_post` |
+| `V1.4-RATE-02` | 사용자 시도 제한 | 사용자별 1시간 최대 10회 시도와 기존 성공 5건 제한 병행 | `consume_report_rate_limit`, `report_post` |
+| `V1.4-RATE-03` | 차단 로그 제한 | 제한 도달 이벤트는 범위별 윈도마다 한 번만 기록해 로그 증폭 방지 | `report_rate_limit.blocked_logged` |
+| `V1.4-IP-01` | IP 최소 수집 | 정규화된 IP를 비밀키 기반 HMAC-SHA256으로 변환하고 원문 미저장 | `get_client_ip_hash` |
+| `V1.4-IP-02` | 프록시 신뢰 경계 | 기본값은 전달 IP 헤더를 무시하고 명시한 프록시 홉만 `ProxyFix`로 신뢰 | `MARKET_TRUSTED_PROXY_COUNT`, `ProxyFix` |
+| `V1.4-AUDIT-01` | 실패 감사 로그 | 검증·개인정보·중복·사용자/IP 제한 실패를 사유 코드로 기록 | `report_post`, `create_report_audit_table` |
+| `V1.4-AUDIT-02` | 민감정보 제외 | 감사 로그에 신고 사유·IP 원문·세션·CSRF Token을 저장하지 않음 | `add_report_audit_log` |
+| `V1.4-PRIVACY-01` | 개인정보 탐지 | NFKC 정규화 후 이메일·휴대전화·주민등록번호 패턴 저장 거부 | `report_reason_contains_sensitive_data`, `validate_report_reason` |
+| `V1.4-BACKUP-01` | 안전한 백업 | 저장소 밖 새 파일에 SQLite Backup API로 복사하고 권한 `600` 설정 | `scripts/database_backup.py` |
+| `V1.4-BACKUP-02` | 백업 검증 | 백업 전후 `quick_check`와 `foreign_key_check` 수행 | `verify_database`, `copy_verified_database` |
+| `V1.4-BACKUP-03` | 덮어쓰기 방지 | 원자적 새 파일 생성으로 기존 백업과 실행 DB 덮어쓰기 거부 | `resolved_output_path`, `copy_verified_database` |
+| `V1.4-RESTORE-01` | 복구 검증 | 백업을 별도 새 파일로 복구하고 무결성·권한을 재검증 | `restore_database_to_new_file` |
+
+IP HMAC은 동일 IP의 반복 시도를 비교하기 위한 가명 식별자입니다. 원문 복원에는
+사용하지 않으며 `MARKET_SECRET_KEY`가 변경되면 기존 IP 제한 범위도 사실상
+초기화됩니다. 전달 IP 헤더는 `MARKET_TRUSTED_PROXY_COUNT`가 `0`보다 클 때만
+설정한 수만큼 신뢰합니다.
+
+개인정보 패턴 차단은 명백한 이메일·국내 휴대전화·주민등록번호 형식을 줄이는
+보조 방어입니다. 모든 개인정보 표현을 완전히 식별할 수 없으므로 신고 화면의
+입력 금지 안내와 함께 적용합니다.
+
+### 데이터베이스 변경
+
+`report_audit_log`에 `source_ip_hash`를 추가하고 다음 실패 이벤트를 허용했습니다.
+
+- `report_rejected_validation`
+- `report_rejected_sensitive_data`
+- `report_rejected_duplicate`
+- `report_rejected_user_rate`
+- `report_rejected_ip_rate`
+
+Version 1.3 감사 로그는 이벤트와 대상 정보를 보존한 채 새 스키마로 이동하며,
+과거 로그에는 원본 IP 정보가 없으므로 `source_ip_hash=NULL`을 유지합니다.
+
+보조 테이블 `report_rate_limit`을 추가했습니다.
+
+| 컬럼 | 용도 |
+|---|---|
+| `scope_type` | `user` 또는 `ip` 제한 구분 |
+| `scope_key` | 사용자 UUID 또는 IP HMAC |
+| `window_started_at` | 현재 제한 윈도 시작 시각 |
+| `attempt_count` | 윈도 내 신고 시도 횟수 |
+| `blocked_logged` | 동일 차단 이벤트 중복 기록 방지 |
+
+로컬 DB 마이그레이션 전 저장소 밖에 백업을 생성하고, 별도 파일 복구 검증까지
+완료했습니다. 마이그레이션 후 외래키 위반은 0건이고
+`PRAGMA integrity_check` 결과는 `ok`였습니다.
+
+### 템플릿·도구 변경
+
+- `templates/report.html`: 이메일·전화번호·주민등록번호 입력 금지 안내
+- `scripts/database_backup.py`: 백업, 무결성 검증, 새 파일 복구 검증 명령
+- `.gitignore`: `*.backup.db`, `*.restore.db` 제외
+
+백업 도구 사용법은 `README.md`의 “데이터베이스 백업과 복구 검증”에서
+확인할 수 있습니다.
+
+### 의존성 및 환경변수 변경
+
+새 Python 의존성은 없습니다.
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `MARKET_TRUSTED_PROXY_COUNT` | `0` | 신뢰할 리버스 프록시 홉 수. 확인된 구성에서만 증가 |
+
+### 검증 결과
+
+실행 명령:
+
+```sh
+python -m pytest -q
+```
+
+결과:
+
+```text
+88 passed
+```
+
+검증한 주요 시나리오:
+
+- IP·사용자별 신고 시도 제한과 제한 윈도당 단일 차단 로그
+- 전달 IP 헤더 기본 미신뢰와 IP HMAC IPv6 정규화
+- 안전하지 않은 신뢰 프록시 수 환경변수 거부
+- 검증·개인정보·중복·횟수 제한 실패 감사 로그
+- 감사 로그에서 신고 사유·IP 원문 제외
+- 이메일·일반 및 전각 전화번호·주민등록번호 패턴 거부
+- Version 1.3 감사 로그 스키마 마이그레이션과 기존 이벤트 보존
+- 저장소 내부 백업, 기존 파일 덮어쓰기 및 손상 DB 거부
+- 백업·복구 파일 권한 `600`
+- 백업·복구 SQLite 무결성과 외래키 위반 검사
+- 전체 Version 1.1~1.3 보안 테스트 회귀 없음
+
+### Version 1.4 이후 남은 보안 항목
+
+- 신고 감사 로그 보존 기간과 승인된 정리 절차
+- 외부 스케줄러를 이용한 정기 백업 자동화
+- 다계정·다중 IP 신고 패턴 모니터링과 알림 시스템
+- 관리자 신고 목록, 검토 상태, 처리자·처리 시각 및 권한 체계
+- 관리자 화면 추가 시 신고 사유 출력 인코딩
+- 다중 애플리케이션 서버 환경의 공용 Rate Limiting 저장소
+- Socket 연결 인증, 메시지 검증 및 Rate Limiting
+- HTTPS/WSS 강제와 보안 헤더
+- Python 전체 의존성 버전 고정과 정기 취약점 검사
+- 기존 Git 이력에 포함됐던 민감 DB 데이터 처리
+
+전체 현재 상태는 `SECURITY_REVIEW.md`에서 관리합니다.
 
 ---
 

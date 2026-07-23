@@ -12,7 +12,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `1.3`
+- 현재 버전: `1.4`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
 - 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
@@ -221,6 +221,25 @@ export MARKET_DEBUG=false
 `MARKET_DEBUG=true`는 오류 정보가 노출될 수 있으므로 공개 환경에서 사용하면
 안 됩니다.
 
+### 신뢰 프록시 설정
+
+신고 IP 제한은 기본적으로 직접 연결된 클라이언트 주소만 사용하며
+`X-Forwarded-For` 헤더를 신뢰하지 않습니다.
+
+```sh
+export MARKET_TRUSTED_PROXY_COUNT=0
+```
+
+통제하는 리버스 프록시가 애플리케이션 바로 앞에 하나 있는 구성이 확실할 때만
+다음과 같이 설정합니다.
+
+```sh
+export MARKET_TRUSTED_PROXY_COUNT=1
+```
+
+실제 프록시 수보다 큰 값을 설정하면 공격자가 전달한 IP 헤더를 신뢰할 수
+있습니다. 프록시 구성을 확인할 수 없다면 기본값 `0`을 유지하세요.
+
 ## 6. 애플리케이션 실행
 
 ```sh
@@ -257,7 +276,37 @@ python -m pytest -q
 [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md), 전체 보안 상태와 남은 작업은
 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)에서 확인합니다.
 
-## 8. 자주 발생하는 문제
+## 8. 데이터베이스 백업과 복구 검증
+
+애플리케이션을 중지한 뒤 저장소 밖의 새 파일로 백업합니다. 기존 파일은
+덮어쓰지 않으며 결과 파일 권한은 `600`으로 설정됩니다.
+
+```sh
+python scripts/database_backup.py backup \
+  --source market.db \
+  --output /private/tmp/market.backup.db
+```
+
+백업의 SQLite 무결성과 외래키를 다시 확인합니다.
+
+```sh
+python scripts/database_backup.py verify \
+  --database /private/tmp/market.backup.db
+```
+
+복구 검증은 운영 DB를 덮어쓰지 않고 새로운 파일을 생성합니다.
+
+```sh
+python scripts/database_backup.py restore \
+  --backup /private/tmp/market.backup.db \
+  --output /private/tmp/market.restore.db
+```
+
+복구 파일 검증이 끝나도 실행 중인 `market.db`를 자동 교체하지 않습니다.
+백업에는 비밀번호 해시, 신고 사유 등 민감한 데이터가 포함될 수 있으므로 Git,
+공개 저장소 또는 공개 클라우드 폴더에 업로드하지 마세요.
+
+## 9. 자주 발생하는 문제
 
 ### `ModuleNotFoundError: No module named 'flask'`
 

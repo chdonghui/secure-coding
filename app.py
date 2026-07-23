@@ -1,4 +1,6 @@
+import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
@@ -13,6 +15,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
 from flask_socketio import SocketIO, send
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 USERNAME_MIN_LENGTH = 3
@@ -30,11 +33,29 @@ REPORT_REASON_MIN_LENGTH = 10
 REPORT_REASON_MAX_LENGTH = 1000
 MAX_REPORTS_PER_WINDOW = 5
 REPORT_RATE_WINDOW_SECONDS = 60 * 60
+MAX_REPORT_ATTEMPTS_PER_USER = 10
+MAX_REPORT_ATTEMPTS_PER_IP = 20
+REPORT_ATTEMPT_WINDOW_SECONDS = 60 * 60
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
 SESSION_ABSOLUTE_SECONDS = 8 * 60 * 60
 CSRF_SESSION_KEY = '_csrf_token'
+REPORT_SENSITIVE_DATA_ERROR = (
+    '신고 사유에 이메일, 전화번호 또는 '
+    '주민등록번호를 입력할 수 없습니다.'
+)
+REPORT_EMAIL_PATTERN = re.compile(
+    r'(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+(?![\w.-])',
+    re.IGNORECASE,
+)
+REPORT_PHONE_PATTERN = re.compile(
+    r'(?<!\d)(?:(?:\+?82[-.\s]?)?0?1[016789])'
+    r'[-.\s]?\d{3,4}[-.\s]?\d{4}(?!\d)'
+)
+REPORT_RESIDENT_ID_PATTERN = re.compile(
+    r'(?<!\d)\d{6}[-\s]?[1-4]\d{6}(?!\d)'
+)
 
 
 def get_required_secret_key():
@@ -58,7 +79,23 @@ def get_boolean_env(name, default):
     raise RuntimeError(f'{name} 환경변수는 true 또는 false로 설정해야 합니다.')
 
 
+def get_integer_env(name, default, minimum=0, maximum=5):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed_value = int(value)
+    except ValueError:
+        raise RuntimeError(f'{name} 환경변수는 정수여야 합니다.') from None
+    if not minimum <= parsed_value <= maximum:
+        raise RuntimeError(
+            f'{name} 환경변수는 {minimum}~{maximum} 범위여야 합니다.'
+        )
+    return parsed_value
+
+
 app = Flask(__name__)
+trusted_proxy_count = get_integer_env('MARKET_TRUSTED_PROXY_COUNT', 0)
 app.config.update(
     SECRET_KEY=get_required_secret_key(),
     DEBUG=get_boolean_env('MARKET_DEBUG', False),
@@ -67,7 +104,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     SESSION_COOKIE_SECURE=get_boolean_env('MARKET_COOKIE_SECURE', True),
+    TRUSTED_PROXY_COUNT=trusted_proxy_count,
 )
+if trusted_proxy_count:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxy_count)
 DATABASE = 'market.db'
 socketio = SocketIO(app)
 password_hasher = PasswordHasher()
@@ -262,14 +302,50 @@ def create_report_audit_table(cursor):
         CREATE TABLE IF NOT EXISTS report_audit_log (
             id TEXT PRIMARY KEY,
             event_type TEXT NOT NULL
-                CHECK(event_type IN ('report_created', 'report_migrated')),
+                CHECK(event_type IN (
+                    'report_created',
+                    'report_migrated',
+                    'report_rejected_validation',
+                    'report_rejected_sensitive_data',
+                    'report_rejected_duplicate',
+                    'report_rejected_user_rate',
+                    'report_rejected_ip_rate'
+                )),
             actor_id TEXT NOT NULL,
-            target_type TEXT NOT NULL
-                CHECK(target_type IN ('user', 'product')),
-            target_id TEXT NOT NULL,
+            target_type TEXT
+                CHECK(
+                    target_type IS NULL
+                    OR target_type IN ('user', 'product')
+                ),
+            target_id TEXT,
+            source_ip_hash TEXT
+                CHECK(
+                    source_ip_hash IS NULL
+                    OR (
+                        length(source_ip_hash) = 64
+                        AND source_ip_hash NOT GLOB '*[^0-9a-f]*'
+                    )
+                ),
             created_at INTEGER NOT NULL
                 CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
             FOREIGN KEY (actor_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def create_report_rate_limit_table(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS report_rate_limit (
+            scope_type TEXT NOT NULL
+                CHECK(scope_type IN ('user', 'ip')),
+            scope_key TEXT NOT NULL,
+            window_started_at INTEGER NOT NULL
+                CHECK(typeof(window_started_at) = 'integer'),
+            attempt_count INTEGER NOT NULL
+                CHECK(typeof(attempt_count) = 'integer' AND attempt_count >= 1),
+            blocked_logged INTEGER NOT NULL DEFAULT 0
+                CHECK(blocked_logged IN (0, 1)),
+            PRIMARY KEY (scope_type, scope_key)
         )
     """)
 
@@ -415,6 +491,102 @@ def report_schema_is_current(cursor):
     )
 
 
+def report_audit_schema_is_current(cursor):
+    columns = {
+        row['name']
+        for row in cursor.execute(
+            'PRAGMA table_info(report_audit_log)'
+        ).fetchall()
+    }
+    schema_row = cursor.execute(
+        '''
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'report_audit_log'
+        '''
+    ).fetchone()
+    normalized_schema = ''.join(
+        (schema_row['sql'] if schema_row else '').split()
+    ).lower()
+    required_events = {
+        'report_created',
+        'report_migrated',
+        'report_rejected_validation',
+        'report_rejected_sensitive_data',
+        'report_rejected_duplicate',
+        'report_rejected_user_rate',
+        'report_rejected_ip_rate',
+    }
+    return (
+        'source_ip_hash' in columns
+        and all(event in normalized_schema for event in required_events)
+    )
+
+
+def migrate_report_audit_schema(cursor):
+    if report_audit_schema_is_current(cursor):
+        return
+
+    columns = {
+        row['name']
+        for row in cursor.execute(
+            'PRAGMA table_info(report_audit_log)'
+        ).fetchall()
+    }
+    source_ip_expression = (
+        'source_ip_hash'
+        if 'source_ip_hash' in columns
+        else 'NULL AS source_ip_hash'
+    )
+    audit_rows = cursor.execute(
+        f'''
+        SELECT
+            id,
+            event_type,
+            actor_id,
+            target_type,
+            target_id,
+            {source_ip_expression},
+            created_at
+        FROM report_audit_log
+        '''
+    ).fetchall()
+
+    cursor.execute('DROP TRIGGER IF EXISTS prevent_report_audit_log_update')
+    cursor.execute('DROP TRIGGER IF EXISTS prevent_report_audit_log_delete')
+    cursor.execute(
+        'ALTER TABLE report_audit_log RENAME TO report_audit_log_legacy_v1'
+    )
+    create_report_audit_table(cursor)
+    cursor.executemany(
+        '''
+        INSERT INTO report_audit_log (
+            id,
+            event_type,
+            actor_id,
+            target_type,
+            target_id,
+            source_ip_hash,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''',
+        [
+            (
+                row['id'],
+                row['event_type'],
+                row['actor_id'],
+                row['target_type'],
+                row['target_id'],
+                row['source_ip_hash'],
+                row['created_at'],
+            )
+            for row in audit_rows
+        ],
+    )
+    cursor.execute('DROP TABLE report_audit_log_legacy_v1')
+
+
 def add_report_audit_log(
     cursor,
     event_type,
@@ -422,13 +594,20 @@ def add_report_audit_log(
     target_type,
     target_id,
     created_at,
+    source_ip_hash=None,
 ):
     cursor.execute(
         '''
         INSERT INTO report_audit_log (
-            id, event_type, actor_id, target_type, target_id, created_at
+            id,
+            event_type,
+            actor_id,
+            target_type,
+            target_id,
+            source_ip_hash,
+            created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''',
         (
             str(uuid.uuid4()),
@@ -436,6 +615,7 @@ def add_report_audit_log(
             actor_id,
             target_type,
             target_id,
+            source_ip_hash,
             created_at,
         ),
     )
@@ -443,7 +623,6 @@ def add_report_audit_log(
 
 def migrate_report_schema(cursor):
     if report_schema_is_current(cursor):
-        ensure_report_schema_objects(cursor)
         return
 
     reports = cursor.execute(
@@ -540,7 +719,6 @@ def migrate_report_schema(cursor):
             migration_time,
         )
     cursor.execute('DROP TABLE report_legacy_v1')
-    ensure_report_schema_objects(cursor)
 
 
 # 테이블 생성 (최초 실행 시에만)
@@ -568,6 +746,9 @@ def init_db():
         create_report_table(cursor)
         create_report_audit_table(cursor)
         migrate_report_schema(cursor)
+        migrate_report_audit_schema(cursor)
+        create_report_rate_limit_table(cursor)
+        ensure_report_schema_objects(cursor)
         db.commit()
 
 
@@ -656,6 +837,17 @@ def validate_product_input(raw_title, raw_description, raw_price):
     return title, description, price, None
 
 
+def report_reason_contains_sensitive_data(reason):
+    return any(
+        pattern.search(reason)
+        for pattern in (
+            REPORT_EMAIL_PATTERN,
+            REPORT_PHONE_PATTERN,
+            REPORT_RESIDENT_ID_PATTERN,
+        )
+    )
+
+
 def validate_report_reason(raw_reason):
     reason = unicodedata.normalize(
         'NFKC',
@@ -672,7 +864,92 @@ def validate_report_reason(raw_reason):
         for character in reason
     ):
         return None, '신고 사유에 허용되지 않는 문자가 포함되어 있습니다.'
+    if report_reason_contains_sensitive_data(reason):
+        return None, REPORT_SENSITIVE_DATA_ERROR
     return reason, None
+
+
+def get_client_ip_hash():
+    raw_address = request.remote_addr or 'unknown'
+    try:
+        normalized_address = ipaddress.ip_address(raw_address).compressed
+    except ValueError:
+        normalized_address = 'unknown'
+    return hmac.new(
+        app.config['SECRET_KEY'].encode('utf-8'),
+        normalized_address.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def consume_report_rate_limit(
+    cursor,
+    scope_type,
+    scope_key,
+    maximum_attempts,
+    now,
+):
+    row = cursor.execute(
+        '''
+        SELECT window_started_at, attempt_count, blocked_logged
+        FROM report_rate_limit
+        WHERE scope_type = ? AND scope_key = ?
+        ''',
+        (scope_type, scope_key),
+    ).fetchone()
+    if row is None:
+        cursor.execute(
+            '''
+            INSERT INTO report_rate_limit (
+                scope_type,
+                scope_key,
+                window_started_at,
+                attempt_count,
+                blocked_logged
+            )
+            VALUES (?, ?, ?, 1, 0)
+            ''',
+            (scope_type, scope_key, now),
+        )
+        return True, False
+
+    window_expired = (
+        now - row['window_started_at'] >= REPORT_ATTEMPT_WINDOW_SECONDS
+        or now < row['window_started_at']
+    )
+    if window_expired:
+        cursor.execute(
+            '''
+            UPDATE report_rate_limit
+            SET window_started_at = ?, attempt_count = 1, blocked_logged = 0
+            WHERE scope_type = ? AND scope_key = ?
+            ''',
+            (now, scope_type, scope_key),
+        )
+        return True, False
+
+    if row['attempt_count'] >= maximum_attempts:
+        should_log = row['blocked_logged'] == 0
+        if should_log:
+            cursor.execute(
+                '''
+                UPDATE report_rate_limit
+                SET blocked_logged = 1
+                WHERE scope_type = ? AND scope_key = ?
+                ''',
+                (scope_type, scope_key),
+            )
+        return False, should_log
+
+    cursor.execute(
+        '''
+        UPDATE report_rate_limit
+        SET attempt_count = attempt_count + 1
+        WHERE scope_type = ? AND scope_key = ?
+        ''',
+        (scope_type, scope_key),
+    )
+    return True, False
 
 
 def validate_report_input(
@@ -1144,6 +1421,52 @@ def report():
 @csrf_protected
 def report_post():
     db = get_db()
+    cursor = db.cursor()
+    now = int(time.time())
+    source_ip_hash = get_client_ip_hash()
+
+    ip_allowed, should_log_ip_block = consume_report_rate_limit(
+        cursor,
+        'ip',
+        source_ip_hash,
+        MAX_REPORT_ATTEMPTS_PER_IP,
+        now,
+    )
+    if not ip_allowed:
+        if should_log_ip_block:
+            add_report_audit_log(
+                cursor,
+                'report_rejected_ip_rate',
+                g.current_user['id'],
+                None,
+                None,
+                now,
+                source_ip_hash,
+            )
+        db.commit()
+        abort(429)
+
+    user_allowed, should_log_user_block = consume_report_rate_limit(
+        cursor,
+        'user',
+        g.current_user['id'],
+        MAX_REPORT_ATTEMPTS_PER_USER,
+        now,
+    )
+    if not user_allowed:
+        if should_log_user_block:
+            add_report_audit_log(
+                cursor,
+                'report_rejected_user_rate',
+                g.current_user['id'],
+                None,
+                None,
+                now,
+                source_ip_hash,
+            )
+        db.commit()
+        abort(429)
+
     report_data, validation_error = validate_report_input(
         request.form.get('target_type', ''),
         request.form.get('target_id', ''),
@@ -1152,10 +1475,24 @@ def report_post():
         db,
     )
     if validation_error:
+        event_type = (
+            'report_rejected_sensitive_data'
+            if validation_error == REPORT_SENSITIVE_DATA_ERROR
+            else 'report_rejected_validation'
+        )
+        add_report_audit_log(
+            cursor,
+            event_type,
+            g.current_user['id'],
+            None,
+            None,
+            now,
+            source_ip_hash,
+        )
+        db.commit()
         flash(validation_error)
         return redirect(url_for('report'))
 
-    now = int(time.time())
     report_count = db.execute(
         '''
         SELECT COUNT(*)
@@ -1168,6 +1505,16 @@ def report_post():
         ),
     ).fetchone()[0]
     if report_count >= MAX_REPORTS_PER_WINDOW:
+        add_report_audit_log(
+            cursor,
+            'report_rejected_user_rate',
+            g.current_user['id'],
+            report_data['target_type'],
+            report_data['target_id'],
+            now,
+            source_ip_hash,
+        )
+        db.commit()
         abort(429)
 
     if report_data['target_type'] == 'user':
@@ -1189,9 +1536,18 @@ def report_post():
             (g.current_user['id'], report_data['target_product_id']),
         ).fetchone()
     if duplicate_report is not None:
+        add_report_audit_log(
+            cursor,
+            'report_rejected_duplicate',
+            g.current_user['id'],
+            report_data['target_type'],
+            report_data['target_id'],
+            now,
+            source_ip_hash,
+        )
+        db.commit()
         abort(429)
 
-    cursor = db.cursor()
     try:
         cursor.execute(
             '''
@@ -1223,6 +1579,7 @@ def report_post():
             report_data['target_type'],
             report_data['target_id'],
             now,
+            source_ip_hash,
         )
         db.commit()
     except sqlite3.IntegrityError as error:

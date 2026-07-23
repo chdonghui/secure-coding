@@ -23,6 +23,8 @@ market.db
 *.db-journal
 *.db-shm
 *.db-wal
+*.backup.db
+*.restore.db
 
 # Python cache and test artifacts
 __pycache__/

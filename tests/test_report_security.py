@@ -106,6 +106,8 @@ def submit_report(
     target_type='user',
     target_id=TARGET_USER_IDS[0],
     reason=VALID_REASON,
+    remote_address='127.0.0.1',
+    headers=None,
 ):
     token = get_csrf_token(client)
     return client.post(
@@ -116,6 +118,8 @@ def submit_report(
             'target_id': target_id,
             'reason': reason,
         },
+        environ_overrides={'REMOTE_ADDR': remote_address},
+        headers=headers,
     )
 
 
@@ -186,6 +190,8 @@ def test_valid_user_report_is_normalized_and_audited(client):
     assert audit_log['actor_id'] == REPORTER_ID
     assert audit_log['target_type'] == 'user'
     assert audit_log['target_id'] == TARGET_USER_IDS[0]
+    assert len(audit_log['source_ip_hash']) == 64
+    assert audit_log['source_ip_hash'] != '127.0.0.1'
 
     connection = sqlite3.connect(market.DATABASE)
     try:
@@ -266,7 +272,10 @@ def test_report_rejects_invalid_missing_or_self_target(
     assert response.status_code == 302
     assert response.headers['Location'].endswith('/report')
     assert fetch_rows('report') == []
-    assert fetch_rows('report_audit_log') == []
+    audit_logs = fetch_rows('report_audit_log')
+    assert len(audit_logs) == 1
+    assert audit_logs[0]['event_type'] == 'report_rejected_validation'
+    assert audit_logs[0]['target_id'] is None
 
 
 @pytest.mark.parametrize(
@@ -288,6 +297,146 @@ def test_report_rejects_invalid_reason(client, reason):
     assert fetch_rows('report') == []
 
 
+@pytest.mark.parametrize(
+    'reason',
+    [
+        '연락처는 user@example.com이며 신고 사유를 설명합니다.',
+        '연락처는 010-1234-5678이며 신고 사유를 설명합니다.',
+        '주민등록번호 900101-1234567이 포함된 신고 사유입니다.',
+        (
+            '연락처는 ０１０－１２３４－５６７８이며 '
+            '신고 사유를 설명합니다.'
+        ),
+    ],
+)
+def test_report_rejects_sensitive_personal_information(client, reason):
+    login_as(client, REPORTER_ID)
+    response = submit_report(client, reason=reason)
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/report')
+    assert fetch_rows('report') == []
+
+    audit_log = fetch_rows('report_audit_log')[0]
+    assert audit_log['event_type'] == 'report_rejected_sensitive_data'
+    assert 'reason' not in audit_log.keys()
+    assert reason not in tuple(audit_log)
+
+
+def test_report_attempt_limit_is_enforced_per_ip(client, monkeypatch):
+    monkeypatch.setattr(market, 'MAX_REPORT_ATTEMPTS_PER_IP', 2)
+    login_as(client, REPORTER_ID)
+
+    for _ in range(2):
+        response = submit_report(
+            client,
+            target_type='invalid',
+            remote_address='203.0.113.10',
+        )
+        assert response.status_code == 302
+
+    blocked_response = submit_report(
+        client,
+        target_type='invalid',
+        remote_address='203.0.113.10',
+    )
+    assert blocked_response.status_code == 429
+    assert [
+        row['event_type']
+        for row in fetch_rows('report_audit_log')
+    ].count('report_rejected_ip_rate') == 1
+
+    repeated_block = submit_report(
+        client,
+        target_type='invalid',
+        remote_address='203.0.113.10',
+    )
+    assert repeated_block.status_code == 429
+    assert [
+        row['event_type']
+        for row in fetch_rows('report_audit_log')
+    ].count('report_rejected_ip_rate') == 1
+
+    different_ip_response = submit_report(
+        client,
+        target_type='invalid',
+        remote_address='203.0.113.11',
+    )
+    assert different_ip_response.status_code == 302
+
+
+def test_report_attempt_limit_is_enforced_per_user(client, monkeypatch):
+    monkeypatch.setattr(market, 'MAX_REPORT_ATTEMPTS_PER_USER', 2)
+    login_as(client, REPORTER_ID)
+
+    for index in range(2):
+        response = submit_report(
+            client,
+            target_type='invalid',
+            remote_address=f'203.0.113.{20 + index}',
+        )
+        assert response.status_code == 302
+
+    blocked_response = submit_report(
+        client,
+        target_type='invalid',
+        remote_address='203.0.113.30',
+    )
+    assert blocked_response.status_code == 429
+    assert any(
+        row['event_type'] == 'report_rejected_user_rate'
+        for row in fetch_rows('report_audit_log')
+    )
+
+
+def test_untrusted_forwarded_address_is_not_used_for_ip_hash(client):
+    login_as(client, REPORTER_ID)
+    submit_report(
+        client,
+        remote_address='203.0.113.40',
+        headers={'X-Forwarded-For': '198.51.100.99'},
+    )
+    first_hash = fetch_rows('report_audit_log')[0]['source_ip_hash']
+
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        connection.execute('DELETE FROM report_rate_limit')
+        connection.commit()
+    finally:
+        connection.close()
+
+    submit_report(
+        client,
+        target_type='invalid',
+        remote_address='203.0.113.40',
+        headers={'X-Forwarded-For': '192.0.2.99'},
+    )
+    audit_logs = fetch_rows('report_audit_log')
+    assert {
+        row['source_ip_hash']
+        for row in audit_logs
+    } == {first_hash}
+    assert market.app.config['TRUSTED_PROXY_COUNT'] == 0
+
+
+def test_ip_hash_normalizes_equivalent_ipv6_addresses():
+    with market.app.test_request_context(
+        environ_overrides={'REMOTE_ADDR': '2001:0db8:0:0:0:0:0:1'}
+    ):
+        expanded_hash = market.get_client_ip_hash()
+    with market.app.test_request_context(
+        environ_overrides={'REMOTE_ADDR': '2001:db8::1'}
+    ):
+        compressed_hash = market.get_client_ip_hash()
+    assert expanded_hash == compressed_hash
+
+
+@pytest.mark.parametrize('value', ['not-a-number', '-1', '6'])
+def test_trusted_proxy_count_rejects_unsafe_values(monkeypatch, value):
+    monkeypatch.setenv('MARKET_TRUSTED_PROXY_COUNT', value)
+    with pytest.raises(RuntimeError):
+        market.get_integer_env('MARKET_TRUSTED_PROXY_COUNT', 0)
+
+
 def test_report_reason_is_not_reflected_as_executable_html(client):
     login_as(client, REPORTER_ID)
     xss_reason = '<script>alert("report-xss")</script> 신고 사유입니다.'
@@ -301,14 +450,19 @@ def test_report_reason_is_not_reflected_as_executable_html(client):
         assert '<script>alert("report-xss")</script>' not in page
 
 
-def test_duplicate_report_is_rate_limited_without_duplicate_audit(client):
+def test_duplicate_report_is_rate_limited_and_audited(client):
     login_as(client, REPORTER_ID)
     assert submit_report(client).status_code == 302
     duplicate_response = submit_report(client)
 
     assert duplicate_response.status_code == 429
     assert len(fetch_rows('report')) == 1
-    assert len(fetch_rows('report_audit_log')) == 1
+    audit_logs = fetch_rows('report_audit_log')
+    assert len(audit_logs) == 2
+    assert {
+        row['event_type']
+        for row in audit_logs
+    } == {'report_created', 'report_rejected_duplicate'}
 
 
 def test_report_rate_limit_blocks_sixth_report_within_one_hour(client):
@@ -322,7 +476,12 @@ def test_report_rate_limit_blocks_sixth_report_within_one_hour(client):
     )
     assert response.status_code == 429
     assert len(fetch_rows('report')) == market.MAX_REPORTS_PER_WINDOW
-    assert len(fetch_rows('report_audit_log')) == market.MAX_REPORTS_PER_WINDOW
+    audit_logs = fetch_rows('report_audit_log')
+    assert len(audit_logs) == market.MAX_REPORTS_PER_WINDOW + 1
+    assert any(
+        row['event_type'] == 'report_rejected_user_rate'
+        for row in audit_logs
+    )
 
 
 def test_report_and_audit_insert_are_atomic(client, monkeypatch):
@@ -552,6 +711,79 @@ def test_reported_product_cannot_be_deleted_and_evidence_is_preserved(client):
         connection.close()
     assert product_exists is not None
     assert len(fetch_rows('report')) == 1
+
+
+def test_version_13_audit_schema_is_migrated_without_losing_events(client):
+    legacy_audit_id = str(uuid.uuid4())
+    connection = sqlite3.connect(market.DATABASE)
+    connection.execute('PRAGMA foreign_keys = ON')
+    try:
+        connection.execute(
+            'DROP TRIGGER IF EXISTS prevent_report_audit_log_update'
+        )
+        connection.execute(
+            'DROP TRIGGER IF EXISTS prevent_report_audit_log_delete'
+        )
+        connection.execute('DROP TABLE report_audit_log')
+        connection.execute(
+            '''
+            CREATE TABLE report_audit_log (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL
+                    CHECK(event_type IN ('report_created', 'report_migrated')),
+                actor_id TEXT NOT NULL,
+                target_type TEXT NOT NULL
+                    CHECK(target_type IN ('user', 'product')),
+                target_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (actor_id) REFERENCES user(id) ON DELETE RESTRICT
+            )
+            '''
+        )
+        connection.execute(
+            '''
+            INSERT INTO report_audit_log (
+                id,
+                event_type,
+                actor_id,
+                target_type,
+                target_id,
+                created_at
+            )
+            VALUES (?, 'report_created', ?, 'user', ?, ?)
+            ''',
+            (
+                legacy_audit_id,
+                REPORTER_ID,
+                TARGET_USER_IDS[0],
+                int(time.time()),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    market.init_db()
+
+    connection = sqlite3.connect(market.DATABASE)
+    connection.row_factory = sqlite3.Row
+    try:
+        migrated_log = connection.execute(
+            'SELECT * FROM report_audit_log WHERE id = ?',
+            (legacy_audit_id,),
+        ).fetchone()
+        audit_columns = {
+            row['name']
+            for row in connection.execute(
+                'PRAGMA table_info(report_audit_log)'
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+
+    assert migrated_log['event_type'] == 'report_created'
+    assert migrated_log['source_ip_hash'] is None
+    assert 'source_ip_hash' in audit_columns
 
 
 def test_legacy_report_schema_is_migrated_and_audited(tmp_path, monkeypatch):
