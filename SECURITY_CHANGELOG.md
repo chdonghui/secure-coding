@@ -16,6 +16,7 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `1.2` | `2026-07-24` | 상품 등록·수정·삭제, 소유권 및 상품 데이터 무결성 강화 | 자동 테스트 45개 통과 |
 | `1.1` | `2026-07-24` | 회원가입, 로그인, 세션 및 프로필 보안 강화 | 자동 테스트 18개 통과 |
 | `1.0` | `2026-07-24` | 기반 코드 점검과 최초 취약점 식별 | 정적 점검 |
 
@@ -25,6 +26,135 @@
 - ⚠️: 일부 방어만 존재하거나 후속 개선 필요
 - ❌: 해당 버전에서 미적용
 - N/A: 해당 버전에 기능이 없음
+
+---
+
+## Version 1.2
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `1.2` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | 상품 등록, 상세 조회, 수정, 삭제, 상품 DB 스키마 |
+| 테스트 | `tests/test_account_security.py`, `tests/test_product_security.py` |
+| 테스트 결과 | `45 passed` |
+
+### 조치 전후 요약
+
+| 항목 | Version 1.1 | Version 1.2 |
+|---|---|---|
+| 제목·설명 검증 | ❌ 브라우저 `required` 속성만 사용 | ✅ 서버 길이·필수 값·제어 문자 검증 |
+| 가격 검증 | ❌ 문자열을 검증 없이 저장 | ✅ ASCII 정수 변환과 0~10억 원 범위 검증 |
+| 상품 CSRF | ❌ 토큰 없음 | ✅ 등록·수정·삭제 POST에 적용 |
+| XSS 방어 | ⚠️ Jinja 자동 이스케이프만 존재하고 회귀 테스트 없음 | ✅ 일반 텍스트 출력 이스케이프와 저장형 XSS 테스트 |
+| 등록 인증 | ⚠️ 로그인 확인은 있으나 실제 사용자 확인 근거 부족 | ✅ 요청마다 실제 사용자를 확인하고 서버 사용자 ID 사용 |
+| 수정·삭제 권한 | ❌ 기능 없음 | ✅ 판매자만 수정·삭제 가능하며 SQL에도 소유자 조건 적용 |
+| 가격 DB 타입 | ❌ `TEXT` | ✅ `INTEGER`와 타입·범위 `CHECK` |
+| 판매자 참조 | ❌ 외래키 없음 | ✅ `user(id)` 외래키와 `ON DELETE RESTRICT` |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드 근거 |
+|---|---|---|---|
+| `V1.2-PRODUCT-01` | 제목 검증 | NFKC 정규화, 앞뒤 공백 제거, 1~100자 및 제어 문자 거부 | `app.py`의 `validate_product_input` |
+| `V1.2-PRODUCT-02` | 설명 검증 | 앞뒤 공백 제거, 1~2,000자 및 NUL 문자 거부 | `app.py`의 `validate_product_input` |
+| `V1.2-PRODUCT-03` | 가격 검증 | ASCII 숫자만 허용하고 0~1,000,000,000원 정수 범위 적용 | `app.py`의 `validate_product_input` |
+| `V1.2-CSRF-01` | 상품 Form 보호 | 등록·수정·삭제 POST에 세션 CSRF Token 검증 | `new_product_post`, `edit_product_post`, `delete_product` |
+| `V1.2-XSS-01` | 출력 인코딩 | 상품 입력을 일반 텍스트로 취급하고 Jinja 자동 이스케이프로 출력 | `templates/dashboard.html`, `templates/view_product.html` |
+| `V1.2-AUTH-01` | 등록 인증 | 로그인된 실제 사용자의 ID만 `seller_id`로 사용 | `new_product`, `new_product_post` |
+| `V1.2-OWNER-01` | 수정 소유권 | 라우트와 UPDATE 조건에서 판매자 ID를 확인 | `require_product_owner`, `edit_product_post` |
+| `V1.2-OWNER-02` | 삭제 소유권 | POST 전용 삭제 라우트와 DELETE 조건에서 판매자 ID를 확인 | `delete_product` |
+| `V1.2-ID-01` | 상품 ID 검증 | URL의 상품 ID를 UUID로 검증하고 미존재 대상은 일반 404 응답 | `get_product_or_404` |
+| `V1.2-DATA-01` | DB 제약 | 필수 값, 길이, NUL, 가격 타입·범위 `CHECK` 적용 | `create_product_table` |
+| `V1.2-DATA-02` | 참조 무결성 | 판매자 외래키와 모든 앱 DB 연결의 `foreign_keys=ON` 적용 | `create_product_table`, `get_db` |
+| `V1.2-DATA-03` | 안전한 실패 | 등록·수정 무결성 오류 시 롤백하고 내부정보 없는 400 응답 | `new_product_post`, `edit_product_post` |
+| `V1.2-DATA-04` | 기존 데이터 마이그레이션 | 기존 값을 새 검증기로 확인한 뒤 안전한 상품 스키마로 교체 | `product_schema_is_current`, `migrate_product_schema` |
+
+상품 제목과 설명은 HTML 입력 기능이 아니라 일반 텍스트 기능입니다. 따라서
+불완전한 문자열 기반 `<script>` 제거 대신 출력 문맥에서 HTML 이스케이프합니다.
+HTML을 허용하는 기능이 추가될 때에만 별도의 허용 목록 Sanitizer가 필요합니다.
+
+### 데이터베이스 변경
+
+`product` 테이블을 기존 데이터를 보존하면서 다음 구조로 강화했습니다.
+
+| 필드 | Version 1.1 | Version 1.2 |
+|---|---|---|
+| `title` | `TEXT NOT NULL` | `TEXT NOT NULL`, 공백 제외 1~100자 및 NUL 차단 `CHECK` |
+| `description` | `TEXT NOT NULL` | `TEXT NOT NULL`, 공백 제외 1~2,000자 및 NUL 차단 `CHECK` |
+| `price` | `TEXT NOT NULL` | `INTEGER NOT NULL`, 정수 타입 및 0~10억 원 `CHECK` |
+| `seller_id` | `TEXT NOT NULL` | `TEXT NOT NULL`, `user(id)` 외래키, 삭제 제한 |
+
+마이그레이션 동작:
+
+1. 현재 상품 스키마의 타입, 외래키 및 필수 `CHECK` 제약을 확인합니다.
+2. 구버전 상품을 서버 검증 함수로 다시 검증하고 판매자 존재 여부를 확인합니다.
+3. 검증할 수 없는 기존 행이 있으면 마이그레이션을 중단하고 원인을 알립니다.
+4. 기존 테이블을 임시 이름으로 변경하고 강화된 테이블을 생성합니다.
+5. 검증된 상품만 정수 가격으로 옮긴 뒤 구버전 테이블을 제거합니다.
+6. 전체 초기화 트랜잭션이 성공할 때만 커밋합니다.
+
+로컬 개발 DB는 저장소 밖에 권한 `600`으로 백업한 뒤 마이그레이션했습니다.
+마이그레이션 후 `PRAGMA foreign_key_check`에 위반이 없었고
+`PRAGMA integrity_check` 결과는 `ok`였습니다. `market.db`와 백업은 Git에
+포함하지 않습니다.
+
+### 템플릿 변경
+
+- `templates/new_product.html`: CSRF, 제목·설명 길이, 정수 가격 범위
+- `templates/edit_product.html`: 소유자용 상품 수정 Form과 동일한 입력 제한
+- `templates/view_product.html`: 소유자에게만 수정 링크와 CSRF 삭제 Form 표시
+
+브라우저 속성은 사용 편의를 위한 보조 수단이며, 실제 보안 판단은 서버 검증과
+DB 제약으로 수행합니다.
+
+### 의존성 및 환경변수 변경
+
+새 의존성과 환경변수는 없습니다.
+
+### 검증 결과
+
+실행 명령:
+
+```sh
+python -m pytest -q
+```
+
+결과:
+
+```text
+45 passed
+```
+
+검증한 주요 시나리오:
+
+- 비로그인 사용자의 상품 등록 차단
+- 등록·수정·삭제의 CSRF Token 누락 차단
+- 정상 상품의 정규화와 정수 가격 저장
+- 빈 값, 공백, 초과 길이, 제어 문자 및 NUL 문자 거부
+- 음수·소수·지수·전각 숫자·상한 초과 가격 거부
+- `<script>`와 이벤트 핸들러 문자열의 저장형 XSS 출력 이스케이프
+- 소유자의 수정·삭제 성공
+- 비소유자의 직접 URL 수정·삭제 요청을 403으로 차단
+- DB `CHECK`와 판매자 외래키 우회 저장 차단
+- 구버전 `TEXT` 가격 상품 데이터의 마이그레이션
+- 비정상·미존재 상품 ID의 내부정보 없는 404 응답
+- Version 1.1 회원 보안 테스트 회귀 없음
+
+### Version 1.2 이후 남은 보안 항목
+
+- 신고 Form CSRF와 서버측 입력·참조 검증
+- Socket 연결 인증, 메시지 검증 및 Rate Limiting
+- IP 단위 로그인 Rate Limiting
+- HTTPS/WSS 강제와 보안 헤더
+- 신고 테이블 외래키, 감사 로그와 신고 남용 방지
+- Python 전체 의존성 버전 고정과 정기 취약점 검사
+- 기존 Git 이력에 포함됐던 민감 DB 데이터 처리
+
+전체 현재 상태는 `SECURITY_REVIEW.md`에서 관리합니다.
 
 ---
 

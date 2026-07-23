@@ -6,9 +6,9 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `1.1` |
+| Current Version | `1.2` |
 | Review Date | `2026-07-24` |
-| Review Type | 정적 코드 및 데이터베이스 구조 점검 |
+| Review Type | 정적 코드, 데이터베이스 구조 및 자동 보안 테스트 |
 | Main Application | `app.py` |
 | Database | `market.db` (SQLite) |
 | Version History | [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md) |
@@ -102,7 +102,7 @@
 - 상품 등록
 - 상품 목록 조회
 - 상품 상세 조회
-- 상품 수정 및 삭제는 아직 구현되지 않음
+- 상품 소유자의 상품 수정 및 삭제
 
 ### 실시간 채팅
 
@@ -138,7 +138,7 @@
 - [x] 회원가입 Form에 CSRF Token을 적용한다.
 - [x] 로그인 Form에 CSRF Token을 적용한다.
 - [x] 프로필 수정 Form에 CSRF Token을 적용한다.
-- [ ] 상품 등록 Form에 CSRF Token을 적용한다.
+- [x] 상품 등록·수정·삭제 Form에 CSRF Token을 적용한다.
 - [ ] 신고 Form에 CSRF Token을 적용한다.
 - [x] 로그아웃을 POST 요청으로 변경하고 CSRF 보호를 적용한다.
 
@@ -147,7 +147,11 @@
 - 토큰 생성·상수 시간 비교: `app.py:179-203`
 - 회원 Form 토큰: `templates/register.html:6`, `templates/login.html:6`, `templates/profile.html:7`
 - POST 로그아웃과 토큰: `app.py:384-390`, `templates/base.html:106-109`
-- 상품 및 신고 Form은 이후 기능군에서 별도 적용 필요
+- 상품 Form 토큰: `templates/new_product.html`, `templates/edit_product.html`,
+  `templates/view_product.html`
+- 상품 POST 검증: `app.py`의 `new_product_post`, `edit_product_post`,
+  `delete_product`
+- 신고 Form은 이후 기능군에서 별도 적용 필요
 
 #### 비밀번호 보안
 
@@ -206,51 +210,66 @@
 
 #### 폼 입력 및 데이터 검증
 
-- [ ] 상품 제목의 최소·최대 길이를 서버에서 검증한다.
-- [ ] 상품 설명의 최대 길이와 허용 형식을 서버에서 검증한다.
-- [ ] 가격을 정수 또는 안전한 Decimal 형식으로 변환한다.
-- [ ] 가격의 최소·최대 범위를 검증한다.
-- [ ] 공백 문자열을 필수 값으로 인정하지 않는다.
-- [ ] 검증 실패 시 일관된 400 응답 또는 사용자 오류 메시지를 반환한다.
-- [ ] DB의 가격 컬럼을 적절한 숫자 타입으로 관리한다.
+- [x] 상품 제목을 정규화하고 1~100자 및 제어 문자를 서버에서 검증한다.
+- [x] 상품 설명을 1~2,000자로 제한하고 NUL 문자를 서버에서 거부한다.
+- [x] 가격은 ASCII 숫자로만 입력받아 정수로 변환한다.
+- [x] 가격을 0~1,000,000,000원 범위로 검증한다.
+- [x] 공백 문자열을 필수 값으로 인정하지 않는다.
+- [x] 검증 실패 시 일관된 사용자 오류 메시지를 반환하고 저장하지 않는다.
+- [x] DB의 가격 컬럼을 `INTEGER` 타입과 범위 `CHECK`로 관리한다.
 
 현재 근거:
 
-- 검증 없는 저장: `app.py:151-161`
-- 가격이 TEXT 타입: `app.py:45`
-- HTML의 `required` 속성은 서버측 검증이 아님: `templates/new_product.html:5-10`
+- 서버측 검증: `app.py`의 `validate_product_input`
+- 등록·수정 적용: `app.py`의 `new_product_post`, `edit_product_post`
+- DB 타입·범위 제약: `app.py`의 `create_product_table`
+- 공격성 입력 테스트: `tests/test_product_security.py`
 
 #### XSS 방어
 
 - [x] 상품 목록과 상세 화면은 Jinja 자동 이스케이프를 사용한다.
-- [ ] 사용자 입력을 JavaScript 또는 HTML 속성에 삽입할 때 문맥별 인코딩을 적용한다.
-- [ ] HTML 입력을 허용해야 하는 기능이 추가되면 허용 목록 기반 Sanitizer를 적용한다.
-- [ ] XSS 회귀 테스트를 추가한다.
+- [x] 상품 입력은 HTML이 아닌 일반 텍스트로 취급하고 출력 시 이스케이프한다.
+- N/A: 상품 입력을 JavaScript 문맥에 직접 삽입하지 않는다.
+- N/A: HTML 입력을 허용하지 않으므로 HTML Sanitizer를 사용하지 않는다.
+- [x] `<script>`와 이벤트 핸들러 문자열을 사용한 저장형 XSS 회귀 테스트를 추가한다.
 
 현재 근거:
 
-- 상품 출력: `templates/dashboard.html:9-10`, `templates/view_product.html:4-7`
+- 상품 출력: `templates/dashboard.html`, `templates/view_product.html`
+- 저장형 XSS 검증: `tests/test_product_security.py`의
+  `test_product_output_escapes_script_markup`
 
 #### 인증 및 소유자 확인
 
 - [x] 상품 등록은 세션에 `user_id`가 있는 경우에만 허용한다.
-- [ ] 세션의 `user_id`가 실제 사용자 레코드와 일치하는지 확인한다.
-- N/A: 상품 수정 기능이 아직 없음
-- N/A: 상품 삭제 기능이 아직 없음
-- [ ] 상품 수정·삭제 기능 추가 시 판매자 소유권을 서버에서 검증한다.
+- [x] 세션의 `user_id`가 실제 사용자 레코드와 일치하는지 요청마다 확인한다.
+- [x] 상품 수정은 서버에서 판매자 소유권을 확인한 뒤 허용한다.
+- [x] 상품 삭제는 서버에서 판매자 소유권을 확인한 뒤 허용한다.
+- [x] 수정·삭제 SQL에도 `seller_id` 조건을 다시 적용한다.
 
 현재 근거:
 
-- 상품 등록 로그인 확인: `app.py:147-150`
-- 상품의 `seller_id`는 세션 값을 사용: `app.py:159-160`
+- 로그인·실사용자 확인: `app.py`의 `load_and_validate_session`,
+  `login_required`
+- 판매자 확인: `app.py`의 `require_product_owner`
+- 수정·삭제 권한 테스트: `tests/test_product_security.py`
 
 #### 데이터 무결성
 
 - [x] 상품 필드에 기본적인 DB `NOT NULL` 제약이 존재한다.
-- [ ] `seller_id`가 실제 사용자와 연결되도록 외래키를 적용한다.
-- [ ] SQLite 외래키 검사를 활성화한다.
-- [ ] 애플리케이션 검증을 통과한 데이터만 저장한다.
-- [ ] 데이터 저장 실패 시 트랜잭션을 롤백하고 안전하게 처리한다.
+- [x] 제목·설명 길이와 가격 타입·범위에 DB `CHECK` 제약을 적용한다.
+- [x] `seller_id`가 실제 사용자와 연결되도록 외래키를 적용한다.
+- [x] 모든 애플리케이션 DB 연결에서 SQLite 외래키 검사를 활성화한다.
+- [x] 애플리케이션 검증을 통과한 데이터만 저장한다.
+- [x] 상품 등록·수정 저장 실패 시 트랜잭션을 롤백하고 일반 오류로 처리한다.
+- [x] 기존 `TEXT` 가격 데이터를 검증한 뒤 `INTEGER` 스키마로 마이그레이션한다.
+
+현재 근거:
+
+- 스키마·마이그레이션: `app.py`의 `create_product_table`,
+  `migrate_product_schema`
+- 외래키 활성화: `app.py`의 `get_db`
+- DB 제약·기존 스키마 테스트: `tests/test_product_security.py`
 
 ### 3. 실시간 채팅 및 메시징
 
@@ -316,8 +335,8 @@
 - [x] 데이터베이스 파일을 Git 추적 대상에서 제외한다.
 - [ ] 기존 Git 이력에 포함된 민감 DB 데이터의 처리 방안을 결정한다.
 - [ ] 데이터베이스 파일 권한을 최소화한다.
-- [ ] SQLite 외래키 검사를 활성화한다.
-- [ ] 스키마 변경 시 재현 가능한 마이그레이션 절차를 사용한다.
+- [x] 애플리케이션의 SQLite 연결에서 외래키 검사를 활성화한다.
+- [x] 사용자·상품 스키마 변경 시 재현 가능한 마이그레이션 절차를 사용한다.
 
 #### HTTP 보안
 
@@ -357,12 +376,12 @@
 
 ### P1 — 높은 우선순위
 
-- [ ] 회원·상품·신고의 서버측 입력 검증
+- [ ] 신고의 서버측 입력 검증
 - [ ] Socket 연결 인증, 이벤트 인증 및 사용자 사칭 방지
 - [ ] 채팅 Rate Limiting과 메시지 크기 제한
 - [ ] HTTPS/WSS와 Secure 세션 쿠키 적용
-- [ ] 세션 만료와 로그인 실패 제한 적용
-- [ ] DB 외래키와 참조 무결성 적용
+- [x] 세션 만료와 로그인 실패 제한 적용
+- [ ] 신고 테이블의 외래키와 참조 무결성 적용
 
 ### P2 — 운영 강화
 
@@ -404,6 +423,7 @@
 
 | Version | Date | 변경 내용 |
 |---|---|---|
+| `1.2` | `2026-07-24` | 상품 등록·수정·삭제 입력 검증, CSRF, 소유권 확인, 저장형 XSS 방어, 가격 `INTEGER`와 외래키 마이그레이션 적용. 전체 자동 테스트 45개 통과 |
 | `1.1` | `2026-07-24` | 회원 입력 검증, Argon2 비밀번호 및 기존 DB 마이그레이션, CSRF, 세션 보안, 프로필 재인증, 로그인 잠금, 계정 열거 방어, 공통 오류 처리 적용. 자동 테스트 18개 통과 |
 | `1.0` | `2026-07-24` | 최초 보안 점검, 기능 범위, 보안 체크리스트, 우선순위 및 버전 관리 정책 작성 |
 

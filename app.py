@@ -1,5 +1,6 @@
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -19,6 +20,12 @@ USERNAME_MAX_LENGTH = 30
 PASSWORD_MIN_LENGTH = 12
 PASSWORD_MAX_LENGTH = 128
 BIO_MAX_LENGTH = 500
+PRODUCT_TITLE_MIN_LENGTH = 1
+PRODUCT_TITLE_MAX_LENGTH = 100
+PRODUCT_DESCRIPTION_MIN_LENGTH = 1
+PRODUCT_DESCRIPTION_MAX_LENGTH = 2000
+PRODUCT_MIN_PRICE = 0
+PRODUCT_MAX_PRICE = 1_000_000_000
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
@@ -71,6 +78,7 @@ def get_db():
     if db is None:
         db = g._database = sqlite3.connect(DATABASE)
         db.row_factory = sqlite3.Row  # 결과를 dict처럼 사용하기 위함
+        db.execute('PRAGMA foreign_keys = ON')
     return db
 
 
@@ -104,6 +112,110 @@ def migrate_plaintext_passwords(cursor):
             )
 
 
+def create_product_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS product (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL
+                CHECK(length(trim(title)) BETWEEN
+                    {PRODUCT_TITLE_MIN_LENGTH} AND {PRODUCT_TITLE_MAX_LENGTH})
+                CHECK(instr(title, char(0)) = 0),
+            description TEXT NOT NULL
+                CHECK(length(trim(description)) BETWEEN
+                    {PRODUCT_DESCRIPTION_MIN_LENGTH}
+                    AND {PRODUCT_DESCRIPTION_MAX_LENGTH})
+                CHECK(instr(description, char(0)) = 0),
+            price INTEGER NOT NULL
+                CHECK(
+                    typeof(price) = 'integer'
+                    AND price BETWEEN {PRODUCT_MIN_PRICE} AND {PRODUCT_MAX_PRICE}
+                ),
+            seller_id TEXT NOT NULL,
+            FOREIGN KEY (seller_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def product_schema_is_current(cursor):
+    columns = {
+        row['name']: row['type'].upper()
+        for row in cursor.execute('PRAGMA table_info(product)').fetchall()
+    }
+    foreign_keys = cursor.execute('PRAGMA foreign_key_list(product)').fetchall()
+    seller_foreign_key_exists = any(
+        row['from'] == 'seller_id' and row['table'] == 'user'
+        for row in foreign_keys
+    )
+    schema_row = cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'product'"
+    ).fetchone()
+    normalized_schema = ''.join((schema_row['sql'] if schema_row else '').split()).lower()
+    required_constraints = (
+        (
+            'check(length(trim(title))between'
+            f'{PRODUCT_TITLE_MIN_LENGTH}and{PRODUCT_TITLE_MAX_LENGTH})'
+        )
+        in normalized_schema
+        and (
+            'check(length(trim(description))between'
+            f'{PRODUCT_DESCRIPTION_MIN_LENGTH}and'
+            f'{PRODUCT_DESCRIPTION_MAX_LENGTH})'
+        )
+        in normalized_schema
+        and (
+            "check(typeof(price)='integer'andpricebetween"
+            f'{PRODUCT_MIN_PRICE}and{PRODUCT_MAX_PRICE})'
+        )
+        in normalized_schema
+        and 'check(instr(title,char(0))=0)' in normalized_schema
+        and 'check(instr(description,char(0))=0)' in normalized_schema
+    )
+    return (
+        columns.get('price') == 'INTEGER'
+        and seller_foreign_key_exists
+        and required_constraints
+    )
+
+
+def migrate_product_schema(cursor):
+    if product_schema_is_current(cursor):
+        return
+
+    products = cursor.execute(
+        'SELECT id, title, description, price, seller_id FROM product'
+    ).fetchall()
+    migrated_products = []
+    for product in products:
+        title, description, price, validation_error = validate_product_input(
+            product['title'],
+            product['description'],
+            str(product['price']),
+        )
+        seller_exists = cursor.execute(
+            'SELECT 1 FROM user WHERE id = ?',
+            (product['seller_id'],),
+        ).fetchone()
+        if validation_error or seller_exists is None:
+            raise RuntimeError(
+                f'기존 상품 {product["id"]}을 안전한 스키마로 '
+                '변환할 수 없습니다.'
+            )
+        migrated_products.append(
+            (product['id'], title, description, price, product['seller_id'])
+        )
+
+    cursor.execute('ALTER TABLE product RENAME TO product_legacy_v1')
+    create_product_table(cursor)
+    cursor.executemany(
+        '''
+        INSERT INTO product (id, title, description, price, seller_id)
+        VALUES (?, ?, ?, ?, ?)
+        ''',
+        migrated_products,
+    )
+    cursor.execute('DROP TABLE product_legacy_v1')
+
+
 # 테이블 생성 (최초 실행 시에만)
 def init_db():
     with app.app_context():
@@ -121,15 +233,7 @@ def init_db():
             )
         """)
         # 상품 테이블 생성
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS product (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                price TEXT NOT NULL,
-                seller_id TEXT NOT NULL
-            )
-        """)
+        create_product_table(cursor)
         # 신고 테이블 생성
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS report (
@@ -141,6 +245,7 @@ def init_db():
         """)
         add_user_security_columns(cursor)
         migrate_plaintext_passwords(cursor)
+        migrate_product_schema(cursor)
         db.commit()
 
 
@@ -174,6 +279,59 @@ def validate_bio(bio):
     if '\x00' in bio:
         return '소개글에 허용되지 않는 문자가 포함되어 있습니다.'
     return None
+
+
+def validate_product_input(raw_title, raw_description, raw_price):
+    title = unicodedata.normalize('NFKC', raw_title.strip())
+    description = raw_description.strip()
+    price_text = raw_price.strip()
+
+    if not PRODUCT_TITLE_MIN_LENGTH <= len(title) <= PRODUCT_TITLE_MAX_LENGTH:
+        return None, None, None, (
+            f'상품 제목은 {PRODUCT_TITLE_MIN_LENGTH}~'
+            f'{PRODUCT_TITLE_MAX_LENGTH}자여야 합니다.'
+        )
+    if '\x00' in title or any(
+        unicodedata.category(character).startswith('C')
+        for character in title
+    ):
+        return (
+            None,
+            None,
+            None,
+            '상품 제목에 허용되지 않는 문자가 포함되어 있습니다.',
+        )
+    if not (
+        PRODUCT_DESCRIPTION_MIN_LENGTH
+        <= len(description)
+        <= PRODUCT_DESCRIPTION_MAX_LENGTH
+    ):
+        return None, None, None, (
+            f'상품 설명은 {PRODUCT_DESCRIPTION_MIN_LENGTH}~'
+            f'{PRODUCT_DESCRIPTION_MAX_LENGTH}자여야 합니다.'
+        )
+    if '\x00' in description:
+        return (
+            None,
+            None,
+            None,
+            '상품 설명에 허용되지 않는 문자가 포함되어 있습니다.',
+        )
+    if not re.fullmatch(r'[0-9]+', price_text):
+        return None, None, None, '가격은 0 이상의 정수로 입력해야 합니다.'
+    if len(price_text) > len(str(PRODUCT_MAX_PRICE)):
+        return None, None, None, (
+            f'가격은 {PRODUCT_MIN_PRICE:,}원 이상 '
+            f'{PRODUCT_MAX_PRICE:,}원 이하여야 합니다.'
+        )
+
+    price = int(price_text)
+    if not PRODUCT_MIN_PRICE <= price <= PRODUCT_MAX_PRICE:
+        return None, None, None, (
+            f'가격은 {PRODUCT_MIN_PRICE:,}원 이상 '
+            f'{PRODUCT_MAX_PRICE:,}원 이하여야 합니다.'
+        )
+    return title, description, price, None
 
 
 def generate_csrf_token():
@@ -269,6 +427,28 @@ def login_required(view):
         return view(*args, **kwargs)
 
     return wrapped_view
+
+
+def get_product_or_404(product_id):
+    try:
+        normalized_product_id = str(uuid.UUID(product_id))
+    except (ValueError, AttributeError):
+        abort(404)
+    if normalized_product_id != product_id.lower():
+        abort(404)
+
+    product = get_db().execute(
+        'SELECT * FROM product WHERE id = ?',
+        (normalized_product_id,),
+    ).fetchone()
+    if product is None:
+        abort(404)
+    return product
+
+
+def require_product_owner(product):
+    if g.current_user is None or product['seller_id'] != g.current_user['id']:
+        abort(403)
 
 
 # 기본 라우트
@@ -438,35 +618,121 @@ def profile_post():
 @login_required
 def new_product():
     if request.method == 'POST':
-        title = request.form['title']
-        description = request.form['description']
-        price = request.form['price']
-        db = get_db()
-        cursor = db.cursor()
-        product_id = str(uuid.uuid4())
-        cursor.execute(
-            "INSERT INTO product (id, title, description, price, seller_id) VALUES (?, ?, ?, ?, ?)",
-            (product_id, title, description, price, session['user_id'])
+        return new_product_post()
+    return render_template('new_product.html')
+
+
+@csrf_protected
+def new_product_post():
+    title, description, price, validation_error = validate_product_input(
+        request.form.get('title', ''),
+        request.form.get('description', ''),
+        request.form.get('price', ''),
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('new_product'))
+
+    db = get_db()
+    product_id = str(uuid.uuid4())
+    try:
+        db.execute(
+            '''
+            INSERT INTO product (id, title, description, price, seller_id)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (product_id, title, description, price, g.current_user['id']),
         )
         db.commit()
-        flash('상품이 등록되었습니다.')
-        return redirect(url_for('dashboard'))
-    return render_template('new_product.html')
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    flash('상품이 등록되었습니다.')
+    return redirect(url_for('view_product', product_id=product_id))
+
 
 # 상품 상세보기
 @app.route('/product/<product_id>')
 def view_product(product_id):
     db = get_db()
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM product WHERE id = ?", (product_id,))
-    product = cursor.fetchone()
-    if not product:
-        flash('상품을 찾을 수 없습니다.')
-        return redirect(url_for('dashboard'))
+    product = get_product_or_404(product_id)
     # 판매자 정보 조회
-    cursor.execute("SELECT * FROM user WHERE id = ?", (product['seller_id'],))
-    seller = cursor.fetchone()
+    seller = db.execute(
+        'SELECT * FROM user WHERE id = ?',
+        (product['seller_id'],),
+    ).fetchone()
     return render_template('view_product.html', product=product, seller=seller)
+
+
+@app.route('/product/<product_id>/edit', methods=['GET', 'POST'])
+@login_required
+def edit_product(product_id):
+    product = get_product_or_404(product_id)
+    require_product_owner(product)
+    if request.method == 'POST':
+        return edit_product_post(product)
+    return render_template('edit_product.html', product=product)
+
+
+@csrf_protected
+def edit_product_post(product):
+    title, description, price, validation_error = validate_product_input(
+        request.form.get('title', ''),
+        request.form.get('description', ''),
+        request.form.get('price', ''),
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('edit_product', product_id=product['id']))
+
+    db = get_db()
+    try:
+        cursor = db.execute(
+            '''
+            UPDATE product
+            SET title = ?, description = ?, price = ?
+            WHERE id = ? AND seller_id = ?
+            ''',
+            (
+                title,
+                description,
+                price,
+                product['id'],
+                g.current_user['id'],
+            ),
+        )
+        if cursor.rowcount != 1:
+            db.rollback()
+            abort(404)
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    flash('상품이 수정되었습니다.')
+    return redirect(url_for('view_product', product_id=product['id']))
+
+
+@app.route('/product/<product_id>/delete', methods=['POST'])
+@login_required
+@csrf_protected
+def delete_product(product_id):
+    product = get_product_or_404(product_id)
+    require_product_owner(product)
+
+    db = get_db()
+    cursor = db.execute(
+        'DELETE FROM product WHERE id = ? AND seller_id = ?',
+        (product['id'], g.current_user['id']),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        abort(404)
+    db.commit()
+    flash('상품이 삭제되었습니다.')
+    return redirect(url_for('dashboard'))
+
 
 # 신고하기
 @app.route('/report', methods=['GET', 'POST'])
