@@ -1,10 +1,28 @@
-# secure-coding
+# Secure Coding
 
-1. Github에서 repository 만들기
-2. 레포 사용 할 곳 폴더로 이동
-3. 터미널에서 `git clone https://github.com/chdonghui/secure-coding.git`
-4. 파일 수정
-5. `git init`
-6. `git add .`
-7. `git commit -m "my first commit`
-8. `git push`
+## Tiny Secondhand Shopping Platform.
+
+You should add some functions and complete the security requirements.
+
+## requirements
+
+if you don't have a miniconda(or anaconda), you can install it on this url. - https://docs.anaconda.com/free/miniconda/index.html
+
+```
+git clone https://github.com/chdonghui/secure-coding.git
+```
+
+## usage
+
+run the server process.
+
+```
+python app.py
+```
+
+if you want to test on external machine, you can utilize the ngrok to forwarding the url.
+```
+# optional
+sudo snap install ngrok
+ngrok http 5000
+```
