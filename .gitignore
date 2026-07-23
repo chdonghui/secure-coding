@@ -1,0 +1,25 @@
+# macOS Finder and filesystem metadata
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# macOS metadata created on network shares
+.AppleDB
+.AppleDesktop
+.apdisk
+Network Trash Folder
+Temporary Items
+
+# Local SQLite runtime data
+market.db
+*.db-journal
+*.db-shm
+*.db-wal

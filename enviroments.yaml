@@ -8,3 +8,5 @@ dependencies:
     - flask 
     - flask-socketio
     - flask-sqlalchemy
+    - argon2-cffi==25.1.0
+    - pytest==8.4.2
