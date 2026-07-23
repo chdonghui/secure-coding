@@ -118,7 +118,7 @@ conda info --envs
 ## 2. 저장소 내려받기
 
 ```sh
-git clone https://github.com/ugonfor/secure-coding
+git clone https://github.com/chdonghui/secure-coding
 cd secure-coding
 ```
 
