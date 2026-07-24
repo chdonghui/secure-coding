@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}주문 내역{% endblock %}
+{% block content %}
+<h2>주문 내역</h2>
+<p>구매와 판매가 완료된 학습용 주문만 표시됩니다.</p>
+{% if orders %}
+  <ul>
+    {% for order in orders %}
+      <li>
+        {% if order.buyer_id == user_id %}
+          <strong>구매</strong>
+          <p>판매자: {{ order.seller_username_snapshot }}</p>
+        {% else %}
+          <strong>판매</strong>
+          <p>구매자: {{ order.buyer_username_snapshot }}</p>
+        {% endif %}
+        <p>상품: {{ order.product_title_snapshot }}</p>
+        <p>금액: {{ "{:,}".format(order.amount) }}원</p>
+        <p>상태: 결제 완료</p>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>주문 내역이 없습니다.</p>
+{% endif %}
+{% endblock %}

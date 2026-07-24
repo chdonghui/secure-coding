@@ -4,13 +4,37 @@
 <h2>{{ product.title }}</h2>
 <p>상품 ID: <code>{{ product.id }}</code></p>
 <p>{{ product.description }}</p>
-<p>가격: {{ product.price }}</p>
+<p>가격: {{ "{:,}".format(product.price) }}원</p>
 <p>판매자: {{ seller.username if seller else '알 수 없음' }}</p>
-{% if session.get('user_id') == product.seller_id %}
+{% if sold_order %}
+  <p><strong>판매 완료</strong></p>
+{% elif session.get('user_id') == product.seller_id %}
   <p><a href="{{ url_for('edit_product', product_id=product.id) }}">상품 수정</a></p>
   <form method="post" action="{{ url_for('delete_product', product_id=product.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit">상품 삭제</button>
   </form>
+{% elif g.current_user and g.current_user.is_admin == 0 and seller and product.price >= 1 %}
+  <p>현재 학습용 잔액: {{ "{:,}".format(balance) }}원</p>
+  <form
+    method="post"
+    action="{{ url_for('purchase_product', product_id=product.id) }}"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="purchase_password">현재 비밀번호</label>
+    <input
+      id="purchase_password"
+      type="password"
+      name="current_password"
+      maxlength="128"
+      autocomplete="current-password"
+      required
+    >
+    <button type="submit">학습용 잔액으로 구매</button>
+  </form>
+{% elif g.current_user and g.current_user.is_admin == 0 and seller %}
+  <p>무료 상품은 학습용 결제 기능으로 구매할 수 없습니다.</p>
+{% elif not g.current_user %}
+  <p><a href="{{ url_for('login') }}">로그인</a> 후 구매할 수 있습니다.</p>
 {% endif %}
 {% endblock %}

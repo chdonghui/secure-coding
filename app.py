@@ -73,6 +73,7 @@ TRANSFER_USER_RATE_LIMIT = 10
 TRANSFER_IP_RATE_LIMIT = 30
 TRANSFER_RATE_WINDOW_SECONDS = 10 * 60
 TRANSFER_RECIPIENT_LIMIT = 100
+ORDER_HISTORY_LIMIT = 100
 SOCKET_CONNECT_IP_RATE_LIMIT = 20
 SOCKET_CONNECT_RATE_WINDOW_SECONDS = 60
 SOCKET_MAX_CONNECTIONS_PER_USER = 5
@@ -370,6 +371,8 @@ def create_transfer_tables(cursor):
             FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE RESTRICT
         )
     """)
+
+
     cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS wallet_adjustment (
             id TEXT PRIMARY KEY,
@@ -412,6 +415,116 @@ def create_transfer_tables(cursor):
             FOREIGN KEY (recipient_id)
                 REFERENCES wallet_account(user_id) ON DELETE RESTRICT
         )
+    """)
+
+
+def create_purchase_order_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS purchase_order (
+            id TEXT PRIMARY KEY,
+            product_id TEXT NOT NULL UNIQUE,
+            buyer_id TEXT NOT NULL,
+            seller_id TEXT NOT NULL,
+            transfer_request_id TEXT NOT NULL UNIQUE,
+            amount INTEGER NOT NULL
+                CHECK(
+                    typeof(amount) = 'integer'
+                    AND amount BETWEEN
+                        {TRANSFER_MIN_AMOUNT} AND {TRANSFER_MAX_AMOUNT}
+                ),
+            status TEXT NOT NULL CHECK(status = 'paid'),
+            product_title_snapshot TEXT NOT NULL,
+            buyer_username_snapshot TEXT NOT NULL,
+            seller_username_snapshot TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(buyer_id <> seller_id),
+            FOREIGN KEY (product_id) REFERENCES product(id) ON DELETE RESTRICT,
+            FOREIGN KEY (buyer_id) REFERENCES wallet_account(user_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (seller_id) REFERENCES wallet_account(user_id)
+                ON DELETE RESTRICT
+        )
+    """)
+
+
+def ensure_purchase_order_schema(cursor):
+    create_purchase_order_table(cursor)
+    cursor.execute('DROP TRIGGER IF EXISTS validate_purchase_order')
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_purchase_order
+        BEFORE INSERT ON purchase_order
+        WHEN
+            NOT EXISTS (
+                SELECT 1
+                FROM product
+                JOIN user AS seller ON seller.id = product.seller_id
+                WHERE
+                    product.id = NEW.product_id
+                    AND product.seller_id = NEW.seller_id
+                    AND product.price = NEW.amount
+                    AND seller.username = NEW.seller_username_snapshot
+                    AND seller.is_admin = 0
+                    AND seller.deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM user_dormancy
+                        WHERE user_dormancy.user_id = seller.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM product_moderation
+                        WHERE product_moderation.product_id = product.id
+                    )
+            )
+            OR NOT EXISTS (
+                SELECT 1
+                FROM user AS buyer
+                WHERE
+                    buyer.id = NEW.buyer_id
+                    AND buyer.username = NEW.buyer_username_snapshot
+                    AND buyer.is_admin = 0
+                    AND buyer.deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM user_dormancy
+                        WHERE user_dormancy.user_id = buyer.id
+                    )
+            )
+            OR NOT EXISTS (
+                SELECT 1
+                FROM money_transfer
+                WHERE
+                    request_id = NEW.transfer_request_id
+                    AND sender_id = NEW.buyer_id
+                    AND recipient_id = NEW.seller_id
+                    AND amount = NEW.amount
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid purchase order');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_purchase_order_update
+        BEFORE UPDATE ON purchase_order
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase order is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_purchase_order_delete
+        BEFORE DELETE ON purchase_order
+        BEGIN
+            SELECT RAISE(ABORT, 'purchase order is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS purchase_order_buyer_created
+        ON purchase_order (buyer_id, created_at DESC, id DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS purchase_order_seller_created
+        ON purchase_order (seller_id, created_at DESC, id DESC)
     """)
 
 
@@ -2036,6 +2149,7 @@ def init_db():
         ensure_moderation_schema(cursor)
         create_admin_role_audit_table(cursor)
         ensure_transfer_schema(cursor)
+        ensure_purchase_order_schema(cursor)
         ensure_direct_message_schema(cursor)
         create_security_rate_limit_table(cursor)
         # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
@@ -3090,6 +3204,11 @@ def products():
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
             )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM purchase_order
+                WHERE purchase_order.product_id = product.id
+            )
     '''
     total_items = db.execute(
         f'SELECT COUNT(*) {product_filter}'
@@ -3135,6 +3254,11 @@ def dashboard():
                 SELECT 1
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM purchase_order
+                WHERE purchase_order.product_id = product.id
             )
     '''
     total_items = db.execute(
@@ -3649,7 +3773,219 @@ def view_product(product_id):
         ''',
         (product['seller_id'],),
     ).fetchone()
-    return render_template('view_product.html', product=product, seller=seller)
+    sold_order = db.execute(
+        '''
+        SELECT id, buyer_username_snapshot, amount, created_at
+        FROM purchase_order
+        WHERE product_id = ?
+        ''',
+        (product['id'],),
+    ).fetchone()
+    balance = None
+    if g.current_user is not None and g.current_user['is_admin'] == 0:
+        balance = get_wallet_balance(db, g.current_user['id'])
+    return render_template(
+        'view_product.html',
+        product=product,
+        seller=seller,
+        sold_order=sold_order,
+        balance=balance,
+    )
+
+
+@app.route('/product/<product_id>/purchase', methods=['POST'])
+@login_required
+@csrf_protected
+def purchase_product(product_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
+    if not verify_sensitive_password(
+        request.form.get('current_password', '')
+    ):
+        flash('현재 비밀번호가 올바르지 않습니다.')
+        return redirect(url_for('view_product', product_id=product_id))
+
+    try:
+        normalized_product_id = str(uuid.UUID(product_id))
+    except (ValueError, AttributeError):
+        abort(404)
+    if normalized_product_id != product_id.lower():
+        abort(404)
+
+    db = get_db()
+    now = int(time.time())
+    cursor = db.cursor()
+    user_allowed = consume_security_rate_limit(
+        cursor,
+        'transfer_user',
+        g.current_user['id'],
+        TRANSFER_USER_RATE_LIMIT,
+        TRANSFER_RATE_WINDOW_SECONDS,
+        now,
+    )
+    ip_allowed = consume_security_rate_limit(
+        cursor,
+        'transfer_ip',
+        get_client_ip_hash(),
+        TRANSFER_IP_RATE_LIMIT,
+        TRANSFER_RATE_WINDOW_SECONDS,
+        now,
+    )
+    db.commit()
+    if not user_allowed or not ip_allowed:
+        abort(429)
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        product = db.execute(
+            '''
+            SELECT
+                product.id,
+                product.title,
+                product.price,
+                product.seller_id,
+                seller.username AS seller_username
+            FROM product
+            JOIN user AS seller ON seller.id = product.seller_id
+            WHERE
+                product.id = ?
+                AND product.seller_id <> ?
+                AND product.price >= ?
+                AND seller.is_admin = 0
+                AND seller.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = seller.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM product_moderation
+                    WHERE product_moderation.product_id = product.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM purchase_order
+                    WHERE purchase_order.product_id = product.id
+                )
+            ''',
+            (
+                normalized_product_id,
+                g.current_user['id'],
+                TRANSFER_MIN_AMOUNT,
+            ),
+        ).fetchone()
+        if product is None:
+            db.rollback()
+            flash('구매할 수 없는 상품입니다.')
+            return redirect(url_for('products'))
+
+        transfer_request_id = str(uuid.uuid4())
+        db.execute(
+            '''
+            INSERT INTO money_transfer (
+                id,
+                request_id,
+                sender_id,
+                recipient_id,
+                amount,
+                memo,
+                sender_username_snapshot,
+                recipient_username_snapshot,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                transfer_request_id,
+                g.current_user['id'],
+                product['seller_id'],
+                product['price'],
+                '상품 구매',
+                g.current_user['username'],
+                product['seller_username'],
+                now,
+            ),
+        )
+        db.execute(
+            '''
+            INSERT INTO purchase_order (
+                id,
+                product_id,
+                buyer_id,
+                seller_id,
+                transfer_request_id,
+                amount,
+                status,
+                product_title_snapshot,
+                buyer_username_snapshot,
+                seller_username_snapshot,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'paid', ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                product['id'],
+                g.current_user['id'],
+                product['seller_id'],
+                transfer_request_id,
+                product['price'],
+                product['title'],
+                g.current_user['username'],
+                product['seller_username'],
+                now,
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError as error:
+        db.rollback()
+        if 'insufficient wallet balance' in str(error):
+            flash('상품 가격보다 학습용 잔액이 부족합니다.')
+            return redirect(url_for('view_product', product_id=product_id))
+        if 'purchase_order.product_id' in str(error):
+            flash('이미 판매된 상품입니다.')
+            return redirect(url_for('products'))
+        abort(400)
+
+    flash('구매가 완료되었습니다. 주문 내역에서 확인할 수 있습니다.')
+    return redirect(url_for('orders'))
+
+
+@app.route('/orders')
+@login_required
+def orders():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
+    db = get_db()
+    order_rows = db.execute(
+        '''
+        SELECT
+            id,
+            product_title_snapshot,
+            amount,
+            status,
+            buyer_id,
+            buyer_username_snapshot,
+            seller_username_snapshot,
+            created_at
+        FROM purchase_order
+        WHERE buyer_id = ? OR seller_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        ''',
+        (
+            g.current_user['id'],
+            g.current_user['id'],
+            ORDER_HISTORY_LIMIT,
+        ),
+    ).fetchall()
+    return render_template(
+        'orders.html',
+        orders=order_rows,
+        user_id=g.current_user['id'],
+    )
 
 
 @app.route('/product/<product_id>/edit', methods=['GET', 'POST'])
@@ -3657,6 +3993,12 @@ def view_product(product_id):
 def edit_product(product_id):
     product = get_product_or_404(product_id)
     require_product_owner(product)
+    if get_db().execute(
+        'SELECT 1 FROM purchase_order WHERE product_id = ?',
+        (product['id'],),
+    ).fetchone() is not None:
+        flash('판매 완료 상품은 수정할 수 없습니다.')
+        return redirect(url_for('view_product', product_id=product['id']))
     if request.method == 'POST':
         return edit_product_post(product)
     return render_template('edit_product.html', product=product)

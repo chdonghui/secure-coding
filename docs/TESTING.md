@@ -94,11 +94,15 @@ SECURE_CODING_PYTHON="${CONDA_PREFIX}/bin/python"
 | 상품 | `tests/test_product_security.py` |
 | 신고 | `tests/test_report_security.py` |
 | 송금 | `tests/test_transfer_security.py` |
+| 구매·주문 | `tests/test_purchase_security.py` |
 | 전체 채팅 | `tests/test_chat_security.py` |
 | 1대1 채팅 | `tests/test_direct_chat_security.py` |
 | 관리자 | `tests/test_admin_moderation_security.py` |
 | DB 백업 | `tests/test_database_backup.py` |
 | 빠른 실행 데모 | `tests/test_quickstart_demo.py` |
+
+구매·주문 테스트는 구매자 인증, 판매자 입금, 잔액 부족, 중복 구매, 판매 완료
+상품 비노출, 관리자 차단, 주문 원장 UPDATE·DELETE 차단을 확인합니다.
 
 특정 파일만 실행하는 예시:
 
