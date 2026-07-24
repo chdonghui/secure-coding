@@ -8,6 +8,7 @@
     <li>
       <a href="{{ url_for('view_product', product_id=product.id) }}">{{ product.title }}</a>
       - 가격: {{ product.price }}
+      - 상품 ID: <code>{{ product.id }}</code>
     </li>
   {% endfor %}
 </ul>

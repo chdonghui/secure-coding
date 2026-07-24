@@ -99,6 +99,7 @@
 </head>
 <body>
   <nav>
+    <a href="{{ url_for('products') }}">상품 목록</a>
     {% if session.get('user_id') %}
       <a href="{{ url_for('dashboard') }}">대시보드</a>
       <a href="{{ url_for('profile') }}">마이페이지</a>

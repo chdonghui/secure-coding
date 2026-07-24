@@ -53,6 +53,7 @@ LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
 SESSION_ABSOLUTE_SECONDS = 8 * 60 * 60
 CSRF_SESSION_KEY = '_csrf_token'
+ACCOUNT_DELETION_CONFIRMATION = '회원탈퇴'
 REPORT_SENSITIVE_DATA_ERROR = (
     '신고 사유에 이메일, 전화번호 또는 '
     '주민등록번호를 입력할 수 없습니다.'
@@ -215,6 +216,20 @@ def add_user_security_columns(cursor):
             '''
             ALTER TABLE user
             ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0
+            '''
+        )
+    if 'deleted_at' not in columns:
+        cursor.execute(
+            '''
+            ALTER TABLE user
+            ADD COLUMN deleted_at INTEGER
+                CHECK(
+                    deleted_at IS NULL
+                    OR (
+                        typeof(deleted_at) = 'integer'
+                        AND deleted_at >= 0
+                    )
+                )
             '''
         )
 
@@ -893,7 +908,16 @@ def init_db():
                 password TEXT NOT NULL,
                 bio TEXT,
                 failed_login_attempts INTEGER NOT NULL DEFAULT 0,
-                locked_until INTEGER
+                locked_until INTEGER,
+                session_version INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER
+                    CHECK(
+                        deleted_at IS NULL
+                        OR (
+                            typeof(deleted_at) = 'integer'
+                            AND deleted_at >= 0
+                        )
+                    )
             )
         """)
         # 상품 테이블 생성
@@ -1139,7 +1163,7 @@ def validate_report_input(
     target_product_id = None
     if target_type == 'user':
         target_user = db.execute(
-            'SELECT id FROM user WHERE id = ?',
+            'SELECT id FROM user WHERE id = ? AND deleted_at IS NULL',
             (target_id,),
         ).fetchone()
         if target_user is None or target_user['id'] == reporter_id:
@@ -1147,7 +1171,12 @@ def validate_report_input(
         target_user_id = target_id
     else:
         target_product = db.execute(
-            'SELECT id, seller_id FROM product WHERE id = ?',
+            '''
+            SELECT product.id, product.seller_id
+            FROM product
+            JOIN user AS seller ON seller.id = product.seller_id
+            WHERE product.id = ? AND seller.deleted_at IS NULL
+            ''',
             (target_id,),
         ).fetchone()
         if target_product is None or target_product['seller_id'] == reporter_id:
@@ -1239,7 +1268,7 @@ def load_and_validate_session():
 
     db = get_db()
     g.current_user = db.execute(
-        'SELECT * FROM user WHERE id = ?',
+        'SELECT * FROM user WHERE id = ? AND deleted_at IS NULL',
         (user_id,),
     ).fetchone()
     session_version = session.get('session_version', 0)
@@ -1275,7 +1304,12 @@ def get_product_or_404(product_id):
         abort(404)
 
     product = get_db().execute(
-        'SELECT * FROM product WHERE id = ?',
+        '''
+        SELECT product.*
+        FROM product
+        JOIN user AS seller ON seller.id = product.seller_id
+        WHERE product.id = ? AND seller.deleted_at IS NULL
+        ''',
         (normalized_product_id,),
     ).fetchone()
     if product is None:
@@ -1305,7 +1339,11 @@ def get_chat_recipient_or_404(recipient_id):
     if normalized_recipient_id is None:
         abort(404)
     recipient = get_db().execute(
-        'SELECT id, username FROM user WHERE id = ?',
+        '''
+        SELECT id, username
+        FROM user
+        WHERE id = ? AND deleted_at IS NULL
+        ''',
         (normalized_recipient_id,),
     ).fetchone()
     if recipient is None or recipient['id'] == g.current_user['id']:
@@ -1318,7 +1356,7 @@ def get_chat_recipient_or_404(recipient_id):
 def index():
     if g.current_user is not None:
         return redirect(url_for('dashboard'))
-    return render_template('index.html')
+    return redirect(url_for('products'))
 
 # 회원가입
 @app.route('/register', methods=['GET', 'POST'])
@@ -1379,7 +1417,10 @@ def login_post():
 
     db = get_db()
     cursor = db.cursor()
-    cursor.execute('SELECT * FROM user WHERE username = ?', (username,))
+    cursor.execute(
+        'SELECT * FROM user WHERE username = ? AND deleted_at IS NULL',
+        (username,),
+    )
     user = cursor.fetchone()
     now = int(time.time())
 
@@ -1432,16 +1473,45 @@ def logout():
     flash('로그아웃되었습니다.')
     return redirect(url_for('index'))
 
-# 대시보드: 사용자 정보와 전체 상품 리스트 표시
+# 공개 상품 목록
+@app.route('/products')
+def products():
+    public_products = get_db().execute(
+        '''
+        SELECT
+            product.id,
+            product.title,
+            product.description,
+            product.price,
+            product.seller_id,
+            seller.username AS seller_username
+        FROM product
+        JOIN user AS seller ON seller.id = product.seller_id
+        WHERE seller.deleted_at IS NULL
+        ORDER BY product.title, product.id
+        '''
+    ).fetchall()
+    return render_template('products.html', products=public_products)
+
+
+# 대시보드: 로그인 사용자 정보와 공개 상품 리스트 표시
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    db = get_db()
-    cursor = db.cursor()
-    # 모든 상품 조회
-    cursor.execute("SELECT * FROM product")
-    all_products = cursor.fetchall()
-    return render_template('dashboard.html', products=all_products, user=g.current_user)
+    public_products = get_db().execute(
+        '''
+        SELECT product.*
+        FROM product
+        JOIN user AS seller ON seller.id = product.seller_id
+        WHERE seller.deleted_at IS NULL
+        ORDER BY product.title, product.id
+        '''
+    ).fetchall()
+    return render_template(
+        'dashboard.html',
+        products=public_products,
+        user=g.current_user,
+    )
 
 # 마이페이지: 로그인한 사용자의 계정 정보 조회와 소개글 업데이트
 @app.route('/profile', methods=['GET', 'POST'])
@@ -1532,6 +1602,66 @@ def update_password():
     return redirect(url_for('login'))
 
 
+@app.route('/profile/delete', methods=['POST'])
+@login_required
+@csrf_protected
+def delete_account():
+    current_password = request.form.get('current_password', '')
+    confirmation = request.form.get('confirmation', '')
+    if (
+        len(current_password) > PASSWORD_MAX_LENGTH
+        or not verify_password(g.current_user['password'], current_password)
+    ):
+        flash('현재 비밀번호가 올바르지 않습니다.')
+        return redirect(url_for('profile'))
+    if not hmac.compare_digest(
+        confirmation.encode('utf-8'),
+        ACCOUNT_DELETION_CONFIRMATION.encode('utf-8'),
+    ):
+        flash(f'확인 문구로 {ACCOUNT_DELETION_CONFIRMATION}를 입력해주세요.')
+        return redirect(url_for('profile'))
+
+    user_id = g.current_user['id']
+    anonymized_username = f'deleted-{user_id}'
+    disabled_password = password_hasher.hash(secrets.token_urlsafe(48))
+    deleted_at = int(time.time())
+    db = get_db()
+    cursor = db.execute(
+        '''
+        UPDATE user
+        SET
+            username = ?,
+            password = ?,
+            bio = NULL,
+            failed_login_attempts = 0,
+            locked_until = NULL,
+            session_version = session_version + 1,
+            deleted_at = ?
+        WHERE
+            id = ?
+            AND session_version = ?
+            AND deleted_at IS NULL
+        ''',
+        (
+            anonymized_username,
+            disabled_password,
+            deleted_at,
+            user_id,
+            g.current_user['session_version'],
+        ),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        session.clear()
+        abort(403)
+    db.commit()
+
+    disconnect_user_sockets(user_id)
+    session.clear()
+    flash('회원 탈퇴가 완료되었습니다.')
+    return redirect(url_for('products'))
+
+
 # 상품 등록
 @app.route('/product/new', methods=['GET', 'POST'])
 @login_required
@@ -1594,7 +1724,7 @@ def view_product(product_id):
     product = get_product_or_404(product_id)
     # 판매자 정보 조회
     seller = db.execute(
-        'SELECT * FROM user WHERE id = ?',
+        'SELECT id, username FROM user WHERE id = ? AND deleted_at IS NULL',
         (product['seller_id'],),
     ).fetchone()
     return render_template('view_product.html', product=product, seller=seller)
@@ -1683,7 +1813,7 @@ def direct_chat_users():
         '''
         SELECT id, username
         FROM user
-        WHERE id <> ?
+        WHERE id <> ? AND deleted_at IS NULL
         ORDER BY username, id
         LIMIT ?
         ''',
@@ -1930,7 +2060,11 @@ def get_authenticated_socket_user():
         return None
 
     user = get_db().execute(
-        'SELECT id, username, session_version FROM user WHERE id = ?',
+        '''
+        SELECT id, username, session_version
+        FROM user
+        WHERE id = ? AND deleted_at IS NULL
+        ''',
         (user_id,),
     ).fetchone()
     session_version = session.get('session_version', 0)
@@ -1991,6 +2125,22 @@ def validate_direct_chat_message(data):
 
 def direct_chat_room(user_id):
     return f'direct-chat-user:{user_id}'
+
+
+def disconnect_user_sockets(user_id):
+    participants = list(
+        socketio.server.manager.get_participants(
+            '/',
+            direct_chat_room(user_id),
+        )
+    )
+    for participant in participants:
+        socket_id = (
+            participant[0]
+            if isinstance(participant, tuple)
+            else participant
+        )
+        socketio.server.disconnect(socket_id, namespace='/')
 
 
 def prune_chat_rate_limit_state(now):
@@ -2151,7 +2301,7 @@ def handle_send_direct_message_event(data):
 
     db = get_db()
     recipient = db.execute(
-        'SELECT id FROM user WHERE id = ?',
+        'SELECT id FROM user WHERE id = ? AND deleted_at IS NULL',
         (recipient_id,),
     ).fetchone()
     if recipient is None:

@@ -156,6 +156,32 @@ def test_product_registration_requires_authenticated_user(client):
     assert fetch_products() == []
 
 
+def test_product_catalog_is_public_but_management_requires_login(client):
+    setup_owner(client)
+    create_product(client)
+    product = fetch_products()[0]
+    logout_user(client)
+
+    landing = client.get('/')
+    catalog_response = client.get('/products')
+    catalog = catalog_response.get_data(as_text=True)
+    detail = client.get(f'/product/{product["id"]}').get_data(as_text=True)
+
+    assert landing.status_code == 302
+    assert landing.headers['Location'].endswith('/products')
+    assert catalog_response.status_code == 200
+    assert product['title'] in catalog
+    assert product['id'] in catalog
+    assert OWNER_USERNAME in catalog
+    assert '/product/new' not in catalog
+    assert '/products/manage' not in catalog
+    assert '/chat' not in catalog
+    assert product['id'] in detail
+    assert client.get('/product/new').headers['Location'].endswith('/login')
+    assert client.get('/products/manage').headers['Location'].endswith('/login')
+    assert client.get('/chat').headers['Location'].endswith('/login')
+
+
 def test_product_state_changes_require_csrf(client):
     setup_owner(client)
 
@@ -245,10 +271,12 @@ def test_product_output_escapes_script_markup(client):
     product = fetch_products()[0]
 
     dashboard = client.get('/dashboard').get_data(as_text=True)
+    catalog = client.get('/products').get_data(as_text=True)
     management = client.get('/products/manage').get_data(as_text=True)
     detail = client.get(f'/product/{product["id"]}').get_data(as_text=True)
     edit = client.get(f'/product/{product["id"]}/edit').get_data(as_text=True)
     assert xss_title not in dashboard
+    assert xss_title not in catalog
     assert xss_title not in management
     assert xss_title not in detail
     assert xss_title not in edit
@@ -256,6 +284,7 @@ def test_product_output_escapes_script_markup(client):
     assert xss_description not in detail
     assert xss_description not in edit
     assert '&lt;script&gt;alert' in dashboard
+    assert '&lt;script&gt;alert' in catalog
     assert '&lt;script&gt;alert' in management
     assert '&lt;script&gt;alert' in detail
     assert '&lt;script&gt;alert' in edit

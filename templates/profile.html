@@ -53,4 +53,31 @@
   ><br>
   <button type="submit">비밀번호 변경</button>
 </form>
+
+<h3>회원 탈퇴</h3>
+<p>
+  탈퇴하면 다시 로그인할 수 없고 등록 상품은 공개 목록에서 숨겨집니다.
+  신고와 1대1 채팅의 무결성을 위해 식별 정보가 제거된 기록은 보존됩니다.
+</p>
+<form method="post" action="{{ url_for('delete_account') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  현재 비밀번호:
+  <input
+    type="password"
+    name="current_password"
+    maxlength="128"
+    autocomplete="current-password"
+    required
+  ><br>
+  확인 문구:
+  <input
+    type="text"
+    name="confirmation"
+    maxlength="4"
+    autocomplete="off"
+    placeholder="회원탈퇴"
+    required
+  ><br>
+  <button type="submit">회원 탈퇴</button>
+</form>
 {% endblock %}

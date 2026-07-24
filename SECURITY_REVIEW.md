@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `2.0` |
+| Current Version | `2.1` |
 | Review Date | `2026-07-24` |
 | Review Type | 정적 코드, 데이터베이스 구조 및 자동 보안 테스트 |
 | Main Application | `app.py` |
@@ -98,11 +98,12 @@
 - 로그인한 본인의 사용자명·소개글 조회
 - 현재 비밀번호 재인증 후 소개글 수정
 - 현재 비밀번호 재인증 후 비밀번호 변경
+- 현재 비밀번호 재인증 후 계정 탈퇴와 세션 종료
 
 ### 상품
 
 - 상품 등록
-- 상품 목록 조회
+- 비로그인 사용자도 접근 가능한 상품 목록·상품 ID 조회
 - 상품 상세 조회
 - 로그인한 사용자의 등록 상품 관리 목록
 - 상품 소유자의 상품 수정 및 삭제
@@ -150,6 +151,7 @@
 - [x] 로그인 Form에 CSRF Token을 적용한다.
 - [x] 프로필 수정 Form에 CSRF Token을 적용한다.
 - [x] 비밀번호 변경 Form에 CSRF Token을 적용한다.
+- [x] 회원 탈퇴 Form에 CSRF Token을 적용한다.
 - [x] 상품 등록·수정·삭제 Form에 CSRF Token을 적용한다.
 - [x] 신고 Form에 CSRF Token을 적용한다.
 - [x] 로그아웃을 POST 요청으로 변경하고 CSRF 보호를 적용한다.
@@ -159,7 +161,7 @@
 - 토큰 생성·상수 시간 비교: `app.py:179-203`
 - 회원 Form 토큰: `templates/register.html:6`, `templates/login.html:6`, `templates/profile.html:7`
 - 마이페이지 Form 토큰: `templates/profile.html`, `app.py`의
-  `profile_post`, `update_password`
+  `profile_post`, `update_password`, `delete_account`
 - POST 로그아웃과 토큰: `app.py:384-390`, `templates/base.html:106-109`
 - 상품 Form 토큰: `templates/new_product.html`, `templates/edit_product.html`,
   `templates/view_product.html`
@@ -195,6 +197,8 @@
 - [x] 프로필 수정 전에 현재 비밀번호로 재인증한다.
 - [x] 비밀번호 변경 전에 현재 비밀번호로 재인증한다.
 - [x] 비밀번호 변경 후 현재 세션과 다른 브라우저·Socket 세션을 무효화한다.
+- [x] 회원 탈퇴 전에 현재 비밀번호로 재인증한다.
+- [x] 회원 탈퇴 후 모든 HTTP 세션과 개인 Socket 연결을 무효화한다.
 - [x] 소스 코드의 하드코딩된 `SECRET_KEY`를 제거한다.
 - [x] 32자 이상의 비밀키를 환경변수에서 불러오고 누락 시 실행을 중단한다.
 
@@ -207,6 +211,27 @@
 - 전체 세션 무효화: `app.py`의 `session_version`,
   `load_and_validate_session`, `get_authenticated_socket_user`
 - 비밀번호 변경 보안 테스트: `tests/test_account_security.py`
+
+#### 회원 탈퇴와 기록 보존
+
+- [x] 회원 탈퇴를 로그인·CSRF 보호된 POST 요청으로만 처리한다.
+- [x] 현재 비밀번호와 명시적인 `회원탈퇴` 확인 문구를 모두 검증한다.
+- [x] 사용자명·소개글·기존 비밀번호를 제거하고 탈퇴 시각을 기록한다.
+- [x] 탈퇴 계정은 로그인, 채팅 상대, 신고 대상에서 제외한다.
+- [x] 탈퇴 계정의 상품은 공개 목록과 직접 상세 조회에서 제외한다.
+- [x] 상품·신고·감사·1대1 메시지 외래키 보존을 위해 익명 사용자 행을 유지한다.
+- [x] 탈퇴 후 기존 사용자명을 새 계정에서 다시 사용할 수 있다.
+- [x] 기존 DB의 활성 사용자에 `deleted_at=NULL`을 호환 마이그레이션한다.
+
+현재 근거:
+
+- 탈퇴 재인증·익명화·조건부 갱신: `app.py`의 `delete_account`
+- 활성 계정 확인: `load_and_validate_session`,
+  `get_authenticated_socket_user`, 로그인·채팅·신고 대상 쿼리
+- Socket 즉시 종료: `app.py`의 `disconnect_user_sockets`
+- 탈퇴 Form과 안내: `templates/profile.html`
+- 기록 보존·비노출·마이그레이션 테스트:
+  `tests/test_account_deletion_security.py`
 
 #### 실패 로그인 및 오류 처리
 
@@ -257,13 +282,16 @@
 
 현재 근거:
 
-- 상품 출력: `templates/dashboard.html`, `templates/manage_products.html`,
-  `templates/view_product.html`
+- 상품 출력: `templates/products.html`, `templates/dashboard.html`,
+  `templates/manage_products.html`, `templates/view_product.html`
 - 저장형 XSS 검증: `tests/test_product_security.py`의
   `test_product_output_escapes_script_markup`
 
 #### 인증 및 소유자 확인
 
+- [x] 상품 목록과 상세 조회는 로그인하지 않은 사용자에게도 허용한다.
+- [x] 공개 목록에는 상품 ID, 제목, 가격과 판매자명만 표시한다.
+- [x] 상품 ID를 공개·대시보드·관리·상세 화면에 표시한다.
 - [x] 상품 등록은 세션에 `user_id`가 있는 경우에만 허용한다.
 - [x] 세션의 `user_id`가 실제 사용자 레코드와 일치하는지 요청마다 확인한다.
 - [x] 등록 상품 관리 목록은 로그인 사용자의 `seller_id`와 일치하는 상품만 조회한다.
@@ -273,6 +301,7 @@
 
 현재 근거:
 
+- 공개 상품 조회: `app.py`의 `products`, `templates/products.html`
 - 로그인·실사용자 확인: `app.py`의 `load_and_validate_session`,
   `login_required`
 - 본인 상품 목록 조회: `app.py`의 `manage_products`
@@ -532,6 +561,7 @@
 
 | Version | Date | 변경 내용 |
 |---|---|---|
+| `2.1` | `2026-07-24` | 재인증·CSRF 기반 회원 탈퇴, 계정 익명화·세션과 Socket 종료, 참조 기록 보존과 공개 기능 비노출, 비로그인 상품 목록·상세 및 상품 ID 표시를 적용. 전체 자동 테스트 155개 통과 |
 | `2.0` | `2026-07-24` | 사용자 선택, 당사자 한정 기록 조회와 개인 Socket 방 전달, 영구 메시지 스키마·외래키·인덱스, 발신자 위조·XSS·속도 제한 방어를 적용한 실시간 1대1 채팅 추가. 전체 자동 테스트 145개 통과 |
 | `1.7` | `2026-07-24` | 로그인 사용자 전용 등록 상품 관리 목록과 등록·상세·수정·CSRF 삭제 연결을 추가하고, 판매자 기준 조회 격리와 XSS 출력 방어를 검증. 전체 자동 테스트 119개 통과 |
 | `1.6` | `2026-07-24` | 본인 마이페이지 조회, 소개글 수정 유지, 재인증 기반 Argon2id 비밀번호 변경과 HTTP·Socket 전체 기존 세션 무효화 적용. 전체 자동 테스트 117개 통과 |
