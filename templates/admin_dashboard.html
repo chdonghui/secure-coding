@@ -19,10 +19,14 @@
   <ul>
     {% for product in products %}
       <li>
-        <strong>{{ product.title }}</strong>
+        <strong>
+          <a href="{{ url_for('view_product', product_id=product.id) }}">
+            {{ product.title }}
+          </a>
+        </strong>
         <p>상품 ID: <code>{{ product.id }}</code></p>
         <p>판매자: {{ product.seller_username }}</p>
-        <p>가격: {{ product.price }}</p>
+        <p>가격: {{ "{:,}".format(product.price) }}원</p>
         <p>신고 수: {{ product.report_count }}</p>
         {% if product.seller_is_dormant %}
           <p>판매자 상태: 휴면</p>
@@ -32,21 +36,25 @@
           action="{{ url_for('admin_remove_product', product_id=product.id) }}"
         >
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          관리 삭제 사유:
-          <textarea
-            name="reason"
-            minlength="10"
-            maxlength="500"
-            required
-          ></textarea>
-          현재 비밀번호:
-          <input
-            type="password"
-            name="current_password"
-            maxlength="128"
-            autocomplete="current-password"
-            required
-          >
+          <label>
+            관리 삭제 사유:
+            <textarea
+              name="reason"
+              minlength="10"
+              maxlength="500"
+              required
+            ></textarea>
+          </label>
+          <label>
+            현재 비밀번호:
+            <input
+              type="password"
+              name="current_password"
+              maxlength="128"
+              autocomplete="current-password"
+              required
+            >
+          </label>
           <button type="submit">불량 상품 관리 삭제</button>
         </form>
       </li>

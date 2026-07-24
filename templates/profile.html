@@ -54,6 +54,7 @@
   <button type="submit">비밀번호 변경</button>
 </form>
 
+{% if user.is_admin == 0 and user.account_type == 'user' %}
 <h3>회원 탈퇴</h3>
 <p>
   탈퇴하면 다시 로그인할 수 없고 등록 상품은 공개 목록에서 숨겨집니다.
@@ -80,4 +81,5 @@
   ><br>
   <button type="submit">회원 탈퇴</button>
 </form>
+{% endif %}
 {% endblock %}

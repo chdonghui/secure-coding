@@ -21,6 +21,7 @@
     <a href="{{ url_for('dashboard', page=pagination.page + 1) }}">다음</a>
   {% endif %}
 </nav>
+{% if user.is_admin == 0 %}
 <p><a href="{{ url_for('new_product') }}">새 상품 등록</a></p>
 
 <h3>실시간 채팅</h3>
@@ -76,4 +77,5 @@
     }
   });
 </script>
+{% endif %}
 {% endblock %}

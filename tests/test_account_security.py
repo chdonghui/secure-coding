@@ -105,6 +105,42 @@ def test_duplicate_registration_does_not_reveal_or_replace_account(client):
     assert fetch_user()['password'] == original_hash
 
 
+def test_registration_rejects_existing_quickstart_demo_accounts(client):
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        for index, username in enumerate(
+            ('quick_admin', 'user1', 'user2', 'business_demo'),
+            start=1,
+        ):
+            connection.execute(
+                '''
+                INSERT INTO user (id, username, password, is_admin, account_type)
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                (
+                    f'00000000-0000-0000-0000-0000000009{index:02d}',
+                    username,
+                    market.password_hasher.hash(VALID_PASSWORD),
+                    1 if username == 'quick_admin' else 0,
+                    'business' if username == 'business_demo' else 'user',
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    for username in ('quick_admin', 'user1', 'user2', 'business_demo'):
+        response = register_user(client, username, 'DifferentPassword456!')
+        assert response.status_code == 302
+        assert response.headers['Location'].endswith('/login')
+
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        assert connection.execute('SELECT COUNT(*) FROM user').fetchone()[0] == 4
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     ('username', 'password'),
     [

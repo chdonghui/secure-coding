@@ -16,6 +16,8 @@ import app as market
 
 
 MEMBER_ID = '00000000-0000-0000-0000-000000000501'
+ADMIN_ID = '00000000-0000-0000-0000-000000000508'
+BUSINESS_ID = '00000000-0000-0000-0000-000000000509'
 RECIPIENT_ID = '00000000-0000-0000-0000-000000000502'
 REPORTER_ID = '00000000-0000-0000-0000-000000000503'
 PRODUCT_ID = '00000000-0000-0000-0000-000000000504'
@@ -24,6 +26,8 @@ REPORT_ID = '00000000-0000-0000-0000-000000000506'
 AUDIT_ID = '00000000-0000-0000-0000-000000000507'
 MEMBER_USERNAME = 'deleting_member'
 MEMBER_PASSWORD = 'DeletingPassword123!'
+ADMIN_PASSWORD = 'DeletingAdminPassword123!'
+BUSINESS_PASSWORD = 'DeletingBusinessPassword123!'
 
 
 @pytest.fixture
@@ -65,6 +69,18 @@ def account_deletion_database(tmp_path, monkeypatch):
                 'ReporterPassword123!',
                 None,
             ),
+            (
+                ADMIN_ID,
+                'deletion_admin',
+                ADMIN_PASSWORD,
+                None,
+            ),
+            (
+                BUSINESS_ID,
+                'deletion_business',
+                BUSINESS_PASSWORD,
+                None,
+            ),
         )
         for user_id, username, password, bio in users:
             connection.execute(
@@ -79,6 +95,14 @@ def account_deletion_database(tmp_path, monkeypatch):
                     bio,
                 ),
             )
+        connection.execute(
+            'UPDATE user SET is_admin = 1 WHERE id = ?',
+            (ADMIN_ID,),
+        )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (BUSINESS_ID,),
+        )
         connection.execute(
             '''
             INSERT INTO product (id, title, description, price, seller_id)
@@ -170,14 +194,47 @@ def delete_account(
     password=MEMBER_PASSWORD,
     confirmation=market.ACCOUNT_DELETION_CONFIRMATION,
     include_csrf=True,
+    user_id=MEMBER_ID,
 ):
     data = {
         'current_password': password,
         'confirmation': confirmation,
     }
     if include_csrf:
-        data['csrf_token'] = f'csrf-{MEMBER_ID}'
+        data['csrf_token'] = f'csrf-{user_id}'
     return client.post('/profile/delete', data=data)
+
+
+@pytest.mark.parametrize(
+    ('user_id', 'password', 'username'),
+    [
+        (ADMIN_ID, ADMIN_PASSWORD, 'deletion_admin'),
+        (BUSINESS_ID, BUSINESS_PASSWORD, 'deletion_business'),
+    ],
+)
+def test_admin_and_business_accounts_cannot_delete_or_see_delete_form(
+    account_deletion_database,
+    user_id,
+    password,
+    username,
+):
+    client = authenticated_client(user_id)
+    profile = client.get('/profile')
+    assert profile.status_code == 200
+    assert '회원 탈퇴' not in profile.get_data(as_text=True)
+
+    response = delete_account(client, password, user_id=user_id)
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/profile')
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        account = connection.execute(
+            'SELECT username, deleted_at FROM user WHERE id = ?',
+            (user_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert account == (username, None)
 
 
 def fetch_member():

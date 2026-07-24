@@ -17,17 +17,133 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `6.1` | `2026-07-24` | 관리자 기능 최소 권한, 관리자 채팅·상품 경로 차단, 신고 접수함·관리 삭제 재인증, 가입·탈퇴 권한 고정 | 자동 테스트 215개 통과 |
 | `6.0` | `2026-07-24` | 사업자 역할 스키마·감사 무결성, 판매 전용 권한, 관리자 전환 보호 | 자동 테스트 210개 통과 |
 
-## 6.0 — 사업자 역할과 판매 전용 권한
+## Version 6.1
 
-1. **버전 정보**: `6.0`, 2026-07-24.
-2. **조치 전후 비교**: 기존 단일 일반 사용자 역할에 `account_type`을 추가하고, 사업자를 판매 전용 계정으로 분리했습니다.
-3. **상세 적용 내역**: `user.account_type` CHECK 제약, `business_role_audit` 스냅샷 검증·append-only 트리거, `/admin/users/<id>/business`의 CSRF·재인증·잔액 0 검증, 송금 및 구매 권한 서버 검증을 적용했습니다 (`app.py`, `templates/admin_dashboard.html`).
-4. **데이터베이스 변경과 마이그레이션**: 기존 사용자에는 `account_type='user'`를 기본값으로 추가하고, 초기화 시 사업자 감사 테이블과 트리거를 생성합니다.
-5. **템플릿·의존성·환경변수**: 관리자 사용자 목록에 사업자 상태와 전환 폼을 추가했으며 의존성·환경변수 변경은 없습니다.
-6. **테스트 및 검증**: `python -m pytest -q` (210 passed), `tests/test_business_role_security.py`, `tests/test_quickstart_demo.py`를 실행했습니다.
-7. **남은 항목**: 실제 결제·사업자 등록 심사·법적 사업자 인증은 교육용 범위 밖입니다.
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `6.1` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | 관리자 최소 권한, 신고 수신 UX, 상품 관리 삭제 입력 보호 |
+| 테스트 결과 | `215 passed`, `pip check` |
+
+### Version 6.0과의 조치 전후 비교
+
+| 항목 | Version 6.0 | Version 6.1 |
+|---|---|---|
+| 관리자 메뉴 | 일부 개인 기능 노출 가능 | 사용할 수 없는 상품·채팅 메뉴 제거 |
+| 관리자 채팅 | 라우트·Socket 방어 미완료 | HTTP 경로·Socket 연결·이벤트 차단 |
+| 신고 화면 | 신고 제출 중심 | 관리자 `/report`를 접수 신고 확인 화면으로 분리 |
+| 상품 관리 삭제 | 목록 폼 제공 | 상품 링크·삭제 사유·현재 비밀번호 입력을 명확히 제공 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드·테스트 근거 |
+|---|---|---|---|
+| `V6.1-ADMIN-MINIMAL-01` | 최소 권한 메뉴 | 관리자에게 내 상품 관리·1대1 채팅 메뉴와 대시보드의 상품 등록·전체 채팅 UI를 표시하지 않음 | `templates/base.html`, `templates/dashboard.html`, 관리자 제한 테스트 |
+| `V6.1-ADMIN-MINIMAL-02` | 서버 권한 차단 | 관리자 상품 관리·등록·수정·삭제와 1대1 채팅 HTTP 경로를 403으로 차단 | `app.py`, `test_admin_account_has_no_chat_or_personal_product_management` |
+| `V6.1-ADMIN-CHAT-03` | Socket 차단 | 관리자 세션의 Socket 연결을 거부하고 채팅 이벤트 우회도 방어 | `get_authenticated_socket_user`, `handle_socket_connect`, 채팅 테스트 |
+| `V6.1-REPORT-INBOX-04` | 신고 수신 분리 | 관리자 `/report`에 접수 신고 목록을 표시하고 일반 사용자의 신고 제출 경로는 유지 | `get_received_reports`, `templates/report.html`, 관리자 테스트 |
+| `V6.1-MODERATION-FORM-05` | 관리 삭제 재인증 | 관리자 상품 목록에서 CSRF·10~500자 삭제 사유·현재 비밀번호를 받도록 표시하고 서버에서 검증 | `admin_remove_product`, `templates/admin_dashboard.html`, 상품 삭제 테스트 |
+| `V6.1-ACCOUNT-ROLE-06` | 가입 역할 고정 | 회원가입 INSERT에 `is_admin=0`, `account_type='user'`를 명시하고 기존 빠른 실행 계정 포함 전체 사용자명을 중복 검사 | `username_is_taken`, `tests/test_registration_rejects_existing_quickstart_demo_accounts` |
+| `V6.1-ACCOUNT-DELETION-07` | 탈퇴 권한 제한 | 관리자·사업자 탈퇴 메뉴를 숨기고 `/profile/delete` 직접 요청도 서버에서 차단 | `delete_account`, `templates/profile.html`, 계정 탈퇴 보안 테스트 |
+
+### 데이터베이스 변경과 마이그레이션
+
+DB 스키마와 마이그레이션은 변경하지 않았습니다. 신고 수신 목록은 기존 `report`와
+`report_review` 데이터를 조회하고, 상품 관리 삭제는 기존 `product_moderation`과
+감사 원장을 사용합니다.
+
+### 템플릿, 의존성 및 환경변수 변경
+
+`base.html`, `dashboard.html`, `report.html`, `admin_dashboard.html`의 메뉴·화면을
+변경했습니다. 의존성·잠금 파일·환경변수는 변경하지 않았습니다.
+
+### 테스트 명령과 결과
+
+```sh
+conda activate secure_coding
+MARKET_SECRET_KEY='test-only-secret-key-at-least-32-chars' python -m pytest -q
+python -m pip check
+```
+
+집중 테스트 `66 passed`, 계정·가입·탈퇴 테스트 `47 passed`, 전체 테스트 `215 passed`, `pip check` 이상 없음.
+관리자 메뉴 비노출, HTTP·Socket 우회 차단, 신고 접수함 표시, 삭제 사유·현재
+비밀번호 검증과 기존 보안 회귀를 확인했습니다.
+
+### 다음 버전에 남은 보안 항목
+
+관리자 신고 접수함의 별도 페이지네이션·검색과 운영자 간 내부 대화 기능은 아직
+제공하지 않습니다. 실제 운영 전 중앙 권한 관리와 감사 모니터링은 별도 검토가
+필요합니다.
+
+
+## Version 6.0
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `6.0` |
+| Date | `2026-07-24` |
+| 변경 유형 | Major Version |
+| 적용 범위 | 사업자 역할 스키마, 판매 전용 권한, 관리자 역할 전환 보호 |
+| 테스트 결과 | `210 passed`, `pip check` |
+
+새로운 계정 유형과 역할 감사 원장을 추가했으므로 Major Version으로 기록합니다.
+
+### Version 5.1과의 조치 전후 비교
+
+| 항목 | Version 5.1 | Version 6.0 |
+|---|---|---|
+| 계정 유형 | 관리자·일반 사용자 중심 | `user`·`business` 계정 유형 분리 |
+| 상품 거래 | 일반 사용자의 구매·판매 | 사업자는 판매·판매 주문 조회만 허용 |
+| 역할 변경 | 별도 사업자 역할 없음 | 관리자 재인증·잔액 0원·감사 이력 적용 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드·테스트 근거 |
+|---|---|---|---|
+| `V6.0-BUSINESS-SCHEMA-01` | 역할 스키마 검증 | `user.account_type` 기본값과 `user`·`business` CHECK 제약을 적용 | `app.py`, 사업자 역할 보안 테스트 |
+| `V6.0-BUSINESS-ADMIN-01` | 관리자 전환 보호 | `/admin/users/<id>/business`에 관리자 권한, CSRF, 재인증, 활성 상태와 잔액 0원 검증을 적용 | `admin_set_business_role`, `tests/test_business_role_security.py` |
+| `V6.0-BUSINESS-AUTHZ-01` | 판매 전용 권한 | 사업자의 상품 판매·판매 주문 조회를 허용하고 송금·구매·수취인 조회를 차단 | `app.py`, `templates/base.html`, 사업자 역할 테스트 |
+| `V6.0-BUSINESS-AUDIT-01` | 감사 이력 무결성 | 역할 변경 사유·처리자·대상 Snapshot을 기록하고 UPDATE·DELETE를 Trigger로 차단 | `business_role_audit`, DB 무결성 테스트 |
+| `V6.0-BUSINESS-SESSION-01` | 기존 세션 무효화 | 역할 변경 시 대상 `session_version`을 증가시켜 기존 세션을 무효화 | `admin_set_business_role`, 역할 변경 테스트 |
+
+### 데이터베이스 변경과 마이그레이션
+
+기존 `user` 테이블에 `account_type TEXT NOT NULL DEFAULT 'user'`와 CHECK 제약을
+추가하는 호환 마이그레이션을 적용합니다. `business_role_audit` 테이블, 인덱스와
+Snapshot 검증·append-only Trigger는 `init_db()`에서 기존 DB에도 생성됩니다.
+
+### 템플릿, 의존성 및 환경변수 변경
+
+관리자 사용자 목록에 사업자 상태와 전환 폼을 추가하고, 공통 메뉴·상품 상세·주문
+화면에서 사업자 권한을 반영했습니다. 직접 의존성, 잠금 파일과 환경변수는 변경하지
+않았습니다.
+
+### 테스트 명령과 결과
+
+```sh
+conda activate secure_coding
+MARKET_SECRET_KEY='test-only-secret-key-at-least-32-chars' python -m pytest -q
+python -m pip check
+```
+
+전체 테스트 `210 passed`, `pip check` 이상 없음. 사업자 역할의 정상 전환·해제,
+CSRF·재인증·잔액 조건 우회, 판매 전용 권한, 감사 이력 UPDATE·DELETE 우회와
+빠른 실행 계정 생성을 검증했습니다.
+
+### 다음 버전에 남은 보안 항목
+
+실제 사업자 등록번호 확인·승인, 법적 본인·사업자 인증, 정산·세금계산서와 실제
+결제·환불·분쟁 처리는 교육용 범위 밖입니다.
+
 | `5.1` | `2026-07-24` | 상품 검색 입력의 LIKE 와일드카드 이스케이프, 반응형·접근성 UX 보완 | 자동 테스트 209개 통과 |
 | `5.0` | `2026-07-24` | 학습용 상품 구매·주문 원장, 원자적 잔액 이동, 판매 완료 중복 구매 차단 | 자동 테스트 208개 통과 |
 | `4.2` | `2026-07-24` | 관리자·사업자 송금 참여 차단과 일반 사용자 양방향 권한 분리 | 자동 테스트 204개 통과 |

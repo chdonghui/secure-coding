@@ -51,6 +51,7 @@ CHAT_IP_RATE_WINDOW_SECONDS = 60
 CHAT_DUPLICATE_WINDOW_SECONDS = 5
 DIRECT_CHAT_USER_LIST_LIMIT = 100
 DIRECT_CHAT_HISTORY_LIMIT = 100
+REPORT_RECEIVING_PAGE_LIMIT = 100
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 REGISTER_IP_RATE_LIMIT = 5
@@ -2280,6 +2281,13 @@ def validate_password(password):
     return None
 
 
+def username_is_taken(cursor, username):
+    return cursor.execute(
+        'SELECT 1 FROM user WHERE username = ?',
+        (username,),
+    ).fetchone() is not None
+
+
 def validate_bio(bio):
     if len(bio) > BIO_MAX_LENGTH:
         return f'소개글은 {BIO_MAX_LENGTH}자 이하여야 합니다.'
@@ -3113,6 +3121,33 @@ def get_chat_recipient_or_404(recipient_id):
     return recipient
 
 
+def get_received_reports():
+    return get_db().execute(
+        '''
+        SELECT
+            report.id,
+            report.target_type,
+            report.reason,
+            report.created_at,
+            reporter.username AS reporter_username,
+            target_user.username AS target_username,
+            target_product.title AS target_product_title,
+            COALESCE(report_review.status, 'pending') AS review_status,
+            report_review.note AS review_note
+        FROM report
+        JOIN user AS reporter ON reporter.id = report.reporter_id
+        LEFT JOIN user AS target_user
+            ON target_user.id = report.target_user_id
+        LEFT JOIN product AS target_product
+            ON target_product.id = report.target_product_id
+        LEFT JOIN report_review ON report_review.report_id = report.id
+        ORDER BY report.created_at DESC, report.id DESC
+        LIMIT ?
+        ''',
+        (REPORT_RECEIVING_PAGE_LIMIT,),
+    ).fetchall()
+
+
 # 기본 라우트
 @app.route('/')
 def index():
@@ -3152,15 +3187,17 @@ def register_post():
     if not registration_allowed:
         abort(429)
     password_hash = password_hasher.hash(password)
-    cursor.execute('SELECT id FROM user WHERE username = ?', (username,))
-    if cursor.fetchone() is not None:
+    if username_is_taken(cursor, username):
         flash('회원가입 요청을 처리했습니다. 로그인해주세요.')
         return redirect(url_for('login'))
 
     user_id = str(uuid.uuid4())
     try:
         cursor.execute(
-            'INSERT INTO user (id, username, password) VALUES (?, ?, ?)',
+            '''
+            INSERT INTO user (id, username, password, is_admin, account_type)
+            VALUES (?, ?, ?, 0, 'user')
+            ''',
             (user_id, username, password_hash),
         )
         db.commit()
@@ -3701,8 +3738,11 @@ def update_password():
 def delete_account():
     current_password = request.form.get('current_password', '')
     confirmation = request.form.get('confirmation', '')
-    if g.current_user['is_admin'] == 1:
-        flash('관리자 권한을 해제한 뒤 회원 탈퇴를 진행해주세요.')
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'user'
+    ):
+        flash('관리자와 사업자 계정은 회원 탈퇴를 할 수 없습니다.')
         return redirect(url_for('profile'))
     if not verify_sensitive_password(current_password):
         flash('현재 비밀번호가 올바르지 않습니다.')
@@ -3763,6 +3803,8 @@ def delete_account():
 @app.route('/product/new', methods=['GET', 'POST'])
 @login_required
 def new_product():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     if request.method == 'POST':
         return new_product_post()
     return render_template('new_product.html')
@@ -3819,6 +3861,8 @@ def new_product_post():
 @app.route('/products/manage')
 @login_required
 def manage_products():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     page = get_page_number()
     db = get_db()
     product_filter = '''
@@ -4099,6 +4143,8 @@ def orders():
 @app.route('/product/<product_id>/edit', methods=['GET', 'POST'])
 @login_required
 def edit_product(product_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     product = get_product_or_404(product_id)
     require_product_owner(product)
     if get_db().execute(
@@ -4162,6 +4208,8 @@ def edit_product_post(product):
 @login_required
 @csrf_protected
 def delete_product(product_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     product = get_product_or_404(product_id)
     require_product_owner(product)
 
@@ -4721,6 +4769,8 @@ def admin_review_report(report_id):
 @app.route('/chat')
 @login_required
 def direct_chat_users():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     page = get_page_number()
     db = get_db()
     user_filter = '''
@@ -4784,6 +4834,8 @@ def direct_chat_users():
 @app.route('/chat/<recipient_id>')
 @login_required
 def direct_chat(recipient_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     recipient = get_chat_recipient_or_404(recipient_id)
     page = get_page_number()
     db = get_db()
@@ -4864,6 +4916,8 @@ def direct_chat(recipient_id):
 @login_required
 @csrf_protected
 def block_chat_user(recipient_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     recipient = get_chat_recipient_or_404(recipient_id)
     db = get_db()
     db.execute(
@@ -4882,6 +4936,8 @@ def block_chat_user(recipient_id):
 @login_required
 @csrf_protected
 def unblock_chat_user(recipient_id):
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     recipient = get_chat_recipient_or_404(recipient_id)
     db = get_db()
     db.execute(
@@ -4901,7 +4957,12 @@ def unblock_chat_user(recipient_id):
 @login_required
 def report():
     if request.method == 'POST':
+        if g.current_user['is_admin'] == 1:
+            abort(403)
         return report_post()
+    if g.current_user['is_admin'] == 1:
+        reports = get_received_reports()
+        return render_template('report.html', reports=reports)
     return render_template('report.html')
 
 
@@ -5090,7 +5151,7 @@ def get_authenticated_socket_user():
 
     user = get_db().execute(
         '''
-        SELECT id, username, session_version
+        SELECT id, username, is_admin, session_version
         FROM user
         WHERE
             id = ?
@@ -5251,6 +5312,8 @@ def handle_socket_connect(auth=None):
     user = get_authenticated_socket_user()
     if user is None:
         return False
+    if user['is_admin'] == 1:
+        return False
     db = get_db()
     connection_allowed = consume_security_rate_limit(
         db.cursor(),
@@ -5282,6 +5345,13 @@ def handle_send_message_event(data):
         return reject_chat_event(
             'authentication_required',
             '로그인이 필요합니다.',
+            should_disconnect=True,
+        )
+
+    if user['is_admin'] == 1:
+        return reject_chat_event(
+            'administrator_chat_disabled',
+            '관리자 계정에서는 실시간 채팅을 사용할 수 없습니다.',
             should_disconnect=True,
         )
 
@@ -5331,6 +5401,14 @@ def handle_send_direct_message_event(data):
         return reject_chat_event(
             'authentication_required',
             '로그인이 필요합니다.',
+            should_disconnect=True,
+            event_name='direct_chat_error',
+        )
+
+    if user['is_admin'] == 1:
+        return reject_chat_event(
+            'administrator_chat_disabled',
+            '관리자 계정에서는 1대1 채팅을 사용할 수 없습니다.',
             should_disconnect=True,
             event_name='direct_chat_error',
         )

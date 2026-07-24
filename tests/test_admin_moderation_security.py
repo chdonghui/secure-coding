@@ -149,6 +149,14 @@ def authenticated_client(user_id, csrf_token=None):
     return client, token
 
 
+def connect_socket(client, user_id):
+    return market.socketio.test_client(
+        market.app,
+        flask_test_client=client,
+        auth={'csrf_token': f'csrf-{user_id}'},
+    )
+
+
 def fetch_one(query, parameters=()):
     connection = sqlite3.connect(market.DATABASE)
     connection.row_factory = sqlite3.Row
@@ -166,6 +174,65 @@ def fetch_count(table_name):
         ).fetchone()[0]
     finally:
         connection.close()
+
+
+def test_admin_account_has_no_chat_or_personal_product_management(
+    moderation_database,
+):
+    client, csrf_token = authenticated_client(ADMIN_ID)
+
+    assert client.get('/chat').status_code == 403
+    assert client.get(f'/chat/{TARGET_ID}').status_code == 403
+    assert client.get('/products/manage').status_code == 403
+    assert client.get('/product/new').status_code == 403
+    assert client.get(f'/product/{PRODUCT_ID}/edit').status_code == 403
+    assert client.get('/dashboard').get_data(as_text=True).find('실시간 채팅') == -1
+    assert '새 상품 등록' not in client.get('/dashboard').get_data(as_text=True)
+
+    report_page = client.get('/report')
+    report_html = report_page.get_data(as_text=True)
+    assert report_page.status_code == 200
+    assert '신고 접수함' in report_html
+    assert '상품 사기 의심 정황을 신고합니다.' in report_html
+    assert client.post(
+        '/report',
+        data={'csrf_token': csrf_token},
+    ).status_code == 403
+
+    admin_socket = connect_socket(client, ADMIN_ID)
+    assert not admin_socket.is_connected()
+
+
+def test_admin_product_list_requires_reason_and_current_password(
+    moderation_database,
+):
+    client, csrf_token = authenticated_client(ADMIN_ID)
+    page = client.get('/admin').get_data(as_text=True)
+    assert '불량 상품 관리 삭제' in page
+    assert 'name="reason"' in page
+    assert 'name="current_password"' in page
+
+    wrong_password = client.post(
+        f'/admin/products/{PRODUCT_ID}/remove',
+        data={
+            'csrf_token': csrf_token,
+            'reason': VALID_REASON,
+            'current_password': 'WrongAdminPassword123!',
+        },
+    )
+    assert wrong_password.status_code == 302
+    assert fetch_count('product_moderation') == 0
+
+    valid_removal = client.post(
+        f'/admin/products/{PRODUCT_ID}/remove',
+        data={
+            'csrf_token': csrf_token,
+            'reason': VALID_REASON,
+            'current_password': ADMIN_PASSWORD,
+        },
+    )
+    assert valid_removal.status_code == 302
+    assert fetch_count('product_moderation') == 1
 
 
 def login_user(client, username, password):

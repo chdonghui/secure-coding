@@ -1,6 +1,31 @@
 {% extends "base.html" %}
-{% block title %}신고하기{% endblock %}
+{% block title %}{% if reports is defined %}신고 접수함{% else %}신고하기{% endif %}{% endblock %}
 {% block content %}
+{% if reports is defined %}
+<h2>신고 접수함</h2>
+<p>사용자가 접수한 신고를 확인합니다. 처리 상태 변경은 관리자 페이지에서 수행합니다.</p>
+<p><a href="{{ url_for('admin_dashboard') }}#admin-reports">관리자 페이지에서 신고 검토</a></p>
+{% if reports %}
+  <ul>
+    {% for received_report in reports %}
+      <li>
+        <strong>{{ received_report.target_type }}</strong>
+        <p>신고자: {{ received_report.reporter_username }}</p>
+        {% if received_report.target_username %}
+          <p>대상 사용자: {{ received_report.target_username }}</p>
+        {% endif %}
+        {% if received_report.target_product_title %}
+          <p>대상 상품: {{ received_report.target_product_title }}</p>
+        {% endif %}
+        <p>신고 사유: {{ received_report.reason }}</p>
+        <p>상태: {{ received_report.review_status }}</p>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>접수된 신고가 없습니다.</p>
+{% endif %}
+{% else %}
 <h2>신고하기</h2>
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -33,4 +58,5 @@
   ></textarea><br>
   <button type="submit">신고 접수</button>
 </form>
+{% endif %}
 {% endblock %}
