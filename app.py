@@ -65,6 +65,14 @@ ADMIN_RECENT_AUTH_SECONDS = 5 * 60
 PRODUCT_CREATE_RATE_LIMIT = 10
 PRODUCT_CREATE_RATE_WINDOW_SECONDS = 60 * 60
 MAX_PRODUCTS_PER_USER = 100
+TRANSFER_MIN_AMOUNT = 1
+TRANSFER_MAX_AMOUNT = 10_000_000
+WALLET_MAX_BALANCE = 1_000_000_000_000
+TRANSFER_MEMO_MAX_LENGTH = 100
+TRANSFER_USER_RATE_LIMIT = 10
+TRANSFER_IP_RATE_LIMIT = 30
+TRANSFER_RATE_WINDOW_SECONDS = 10 * 60
+TRANSFER_RECIPIENT_LIMIT = 100
 SOCKET_CONNECT_IP_RATE_LIMIT = 20
 SOCKET_CONNECT_RATE_WINDOW_SECONDS = 60
 SOCKET_MAX_CONNECTIONS_PER_USER = 5
@@ -350,6 +358,285 @@ def create_direct_message_table(cursor):
             FOREIGN KEY (sender_id) REFERENCES user(id) ON DELETE RESTRICT,
             FOREIGN KEY (recipient_id) REFERENCES user(id) ON DELETE RESTRICT
         )
+    """)
+
+
+def create_transfer_tables(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS wallet_account (
+            user_id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS wallet_adjustment (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            amount INTEGER NOT NULL
+                CHECK(
+                    typeof(amount) = 'integer'
+                    AND amount BETWEEN 1 AND {WALLET_MAX_BALANCE}
+                ),
+            source_type TEXT NOT NULL
+                CHECK(source_type = 'quickstart_demo_credit'),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (user_id)
+                REFERENCES wallet_account(user_id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS money_transfer (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            sender_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            amount INTEGER NOT NULL
+                CHECK(
+                    typeof(amount) = 'integer'
+                    AND amount BETWEEN
+                        {TRANSFER_MIN_AMOUNT} AND {TRANSFER_MAX_AMOUNT}
+                ),
+            memo TEXT NOT NULL DEFAULT ''
+                CHECK(length(memo) <= {TRANSFER_MEMO_MAX_LENGTH})
+                CHECK(instr(memo, char(0)) = 0),
+            sender_username_snapshot TEXT NOT NULL,
+            recipient_username_snapshot TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(sender_id <> recipient_id),
+            FOREIGN KEY (sender_id)
+                REFERENCES wallet_account(user_id) ON DELETE RESTRICT,
+            FOREIGN KEY (recipient_id)
+                REFERENCES wallet_account(user_id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def transfer_schema_is_current(cursor):
+    required_columns = {
+        'wallet_account': {'user_id', 'created_at'},
+        'wallet_adjustment': {
+            'id',
+            'user_id',
+            'amount',
+            'source_type',
+            'created_at',
+        },
+        'money_transfer': {
+            'id',
+            'request_id',
+            'sender_id',
+            'recipient_id',
+            'amount',
+            'memo',
+            'sender_username_snapshot',
+            'recipient_username_snapshot',
+            'created_at',
+        },
+    }
+    required_foreign_keys = {
+        'wallet_account': {('user_id', 'user')},
+        'wallet_adjustment': {('user_id', 'wallet_account')},
+        'money_transfer': {
+            ('sender_id', 'wallet_account'),
+            ('recipient_id', 'wallet_account'),
+        },
+    }
+    for table_name, expected_columns in required_columns.items():
+        columns = {
+            row['name']
+            for row in cursor.execute(
+                f'PRAGMA table_info({table_name})'
+            ).fetchall()
+        }
+        foreign_keys = {
+            (row['from'], row['table'])
+            for row in cursor.execute(
+                f'PRAGMA foreign_key_list({table_name})'
+            ).fetchall()
+        }
+        if (
+            not expected_columns <= columns
+            or not required_foreign_keys[table_name] <= foreign_keys
+        ):
+            return False
+    transfer_schema = cursor.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'money_transfer'
+        """
+    ).fetchone()
+    normalized_transfer_schema = ''.join(
+        (transfer_schema['sql'] if transfer_schema else '').split()
+    ).lower()
+    return all(
+        required_text in normalized_transfer_schema
+        for required_text in (
+            'request_idtextnotnullunique',
+            f'amountbetween{TRANSFER_MIN_AMOUNT}and{TRANSFER_MAX_AMOUNT}',
+            f'check(length(memo)<={TRANSFER_MEMO_MAX_LENGTH})',
+            'check(sender_id<>recipient_id)',
+        )
+    )
+
+
+def wallet_balance_sql(user_expression):
+    return f"""
+        (
+            COALESCE((
+                SELECT SUM(wallet_adjustment.amount)
+                FROM wallet_adjustment
+                WHERE wallet_adjustment.user_id = {user_expression}
+            ), 0)
+            + COALESCE((
+                SELECT SUM(incoming_transfer.amount)
+                FROM money_transfer AS incoming_transfer
+                WHERE incoming_transfer.recipient_id = {user_expression}
+            ), 0)
+            - COALESCE((
+                SELECT SUM(outgoing_transfer.amount)
+                FROM money_transfer AS outgoing_transfer
+                WHERE outgoing_transfer.sender_id = {user_expression}
+            ), 0)
+        )
+    """
+
+
+def ensure_transfer_schema(cursor):
+    create_transfer_tables(cursor)
+    if not transfer_schema_is_current(cursor):
+        raise RuntimeError(
+            '기존 송금 스키마가 현재 무결성 요구사항과 호환되지 않습니다.'
+        )
+
+    now = int(time.time())
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO wallet_account (user_id, created_at)
+        SELECT id, ? FROM user
+        """,
+        (now,),
+    )
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS create_wallet_for_new_user
+        AFTER INSERT ON user
+        BEGIN
+            INSERT INTO wallet_account (user_id, created_at)
+            VALUES (
+                NEW.id,
+                CAST(strftime('%s', 'now') AS INTEGER)
+            );
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_wallet_account_update
+        BEFORE UPDATE ON wallet_account
+        BEGIN
+            SELECT RAISE(ABORT, 'wallet account is immutable');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_wallet_account_delete
+        BEFORE DELETE ON wallet_account
+        BEGIN
+            SELECT RAISE(ABORT, 'wallet account is immutable');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_wallet_adjustment_update
+        BEFORE UPDATE ON wallet_adjustment
+        BEGIN
+            SELECT RAISE(ABORT, 'wallet adjustment is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_wallet_adjustment_delete
+        BEFORE DELETE ON wallet_adjustment
+        BEGIN
+            SELECT RAISE(ABORT, 'wallet adjustment is append-only');
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS validate_money_transfer_participants
+        BEFORE INSERT ON money_transfer
+        WHEN
+            NOT EXISTS (
+                SELECT 1
+                FROM user
+                WHERE
+                    user.id = NEW.sender_id
+                    AND user.username = NEW.sender_username_snapshot
+                    AND user.deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM user_dormancy
+                        WHERE user_dormancy.user_id = user.id
+                    )
+            )
+            OR NOT EXISTS (
+                SELECT 1
+                FROM user
+                WHERE
+                    user.id = NEW.recipient_id
+                    AND user.username = NEW.recipient_username_snapshot
+                    AND user.deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM user_dormancy
+                        WHERE user_dormancy.user_id = user.id
+                    )
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid transfer participant');
+        END
+    """)
+    sender_balance = wallet_balance_sql('NEW.sender_id')
+    recipient_balance = wallet_balance_sql('NEW.recipient_id')
+    cursor.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS prevent_money_transfer_overdraft
+        BEFORE INSERT ON money_transfer
+        WHEN {sender_balance} < NEW.amount
+        BEGIN
+            SELECT RAISE(ABORT, 'insufficient wallet balance');
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS prevent_money_transfer_overflow
+        BEFORE INSERT ON money_transfer
+        WHEN {recipient_balance} > {WALLET_MAX_BALANCE} - NEW.amount
+        BEGIN
+            SELECT RAISE(ABORT, 'wallet balance limit exceeded');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_money_transfer_update
+        BEFORE UPDATE ON money_transfer
+        BEGIN
+            SELECT RAISE(ABORT, 'money transfer is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_money_transfer_delete
+        BEFORE DELETE ON money_transfer
+        BEGIN
+            SELECT RAISE(ABORT, 'money transfer is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS money_transfer_sender_created
+        ON money_transfer (sender_id, created_at DESC, id DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS money_transfer_recipient_created
+        ON money_transfer (recipient_id, created_at DESC, id DESC)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS wallet_adjustment_user_created
+        ON wallet_adjustment (user_id, created_at DESC, id DESC)
     """)
 
 
@@ -967,7 +1254,7 @@ def ensure_direct_message_schema(cursor):
     """)
 
 
-def create_security_rate_limit_table(cursor):
+def create_current_security_rate_limit_table(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS security_rate_limit (
             scope_type TEXT NOT NULL
@@ -979,6 +1266,8 @@ def create_security_rate_limit_table(cursor):
                         'reauth_ip',
                         'admin_user',
                         'product_user',
+                        'transfer_user',
+                        'transfer_ip',
                         'socket_ip'
                     )
                 ),
@@ -990,6 +1279,80 @@ def create_security_rate_limit_table(cursor):
             PRIMARY KEY (scope_type, scope_key)
         )
     """)
+
+
+def create_security_rate_limit_table(cursor):
+    table = cursor.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'security_rate_limit'
+        """
+    ).fetchone()
+    if table is not None:
+        normalized_schema = ''.join(table['sql'].split()).lower()
+        if not all(
+            f"'{scope_type}'" in normalized_schema
+            for scope_type in (
+                'register_ip',
+                'login_ip',
+                'reauth_user',
+                'reauth_ip',
+                'admin_user',
+                'product_user',
+                'transfer_user',
+                'transfer_ip',
+                'socket_ip',
+            )
+        ):
+            columns = {
+                row['name']
+                for row in cursor.execute(
+                    'PRAGMA table_info(security_rate_limit)'
+                ).fetchall()
+            }
+            if columns != {
+                'scope_type',
+                'scope_key',
+                'window_started_at',
+                'attempt_count',
+            }:
+                raise RuntimeError(
+                    '기존 요청 제한 스키마를 안전하게 변환할 수 없습니다.'
+                )
+            cursor.execute(
+                'DROP INDEX IF EXISTS security_rate_limit_window'
+            )
+            cursor.execute(
+                'ALTER TABLE security_rate_limit '
+                'RENAME TO security_rate_limit_legacy_v31'
+            )
+            create_current_security_rate_limit_table(cursor)
+            cursor.execute("""
+                INSERT INTO security_rate_limit (
+                    scope_type,
+                    scope_key,
+                    window_started_at,
+                    attempt_count
+                )
+                SELECT
+                    scope_type,
+                    scope_key,
+                    window_started_at,
+                    attempt_count
+                FROM security_rate_limit_legacy_v31
+                WHERE scope_type IN (
+                    'register_ip',
+                    'login_ip',
+                    'reauth_user',
+                    'reauth_ip',
+                    'admin_user',
+                    'product_user',
+                    'socket_ip'
+                )
+            """)
+            cursor.execute('DROP TABLE security_rate_limit_legacy_v31')
+    create_current_security_rate_limit_table(cursor)
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS security_rate_limit_window
         ON security_rate_limit (window_started_at)
@@ -1669,6 +2032,7 @@ def init_db():
         ensure_product_indexes(cursor)
         ensure_moderation_schema(cursor)
         create_admin_role_audit_table(cursor)
+        ensure_transfer_schema(cursor)
         ensure_direct_message_schema(cursor)
         create_security_rate_limit_table(cursor)
         # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
@@ -1838,6 +2202,59 @@ def validate_moderation_reason(raw_reason):
     if report_reason_contains_sensitive_data(reason):
         return None, '관리 사유에 개인정보를 입력할 수 없습니다.'
     return reason, None
+
+
+def validate_transfer_input(
+    raw_recipient_username,
+    raw_amount,
+    raw_memo,
+):
+    recipient_username = normalize_username(raw_recipient_username)
+    if validate_username(recipient_username):
+        return None, None, None, '받는 사용자명을 확인해주세요.'
+
+    amount_text = raw_amount.strip()
+    if (
+        re.fullmatch(r'[1-9][0-9]*', amount_text) is None
+        or len(amount_text) > len(str(TRANSFER_MAX_AMOUNT))
+    ):
+        return None, None, None, (
+            f'송금액은 {TRANSFER_MIN_AMOUNT:,}원 이상 '
+            f'{TRANSFER_MAX_AMOUNT:,}원 이하의 정수여야 합니다.'
+        )
+    amount = int(amount_text)
+    if not TRANSFER_MIN_AMOUNT <= amount <= TRANSFER_MAX_AMOUNT:
+        return None, None, None, (
+            f'송금액은 {TRANSFER_MIN_AMOUNT:,}원 이상 '
+            f'{TRANSFER_MAX_AMOUNT:,}원 이하여야 합니다.'
+        )
+
+    memo = unicodedata.normalize('NFKC', raw_memo.strip())
+    if len(memo) > TRANSFER_MEMO_MAX_LENGTH:
+        return None, None, None, (
+            f'송금 메모는 {TRANSFER_MEMO_MAX_LENGTH}자 이하여야 합니다.'
+        )
+    if any(
+        unicodedata.category(character).startswith('C')
+        for character in memo
+    ):
+        return None, None, None, (
+            '송금 메모에 허용되지 않는 문자가 포함되어 있습니다.'
+        )
+    if memo and report_reason_contains_sensitive_data(memo):
+        return None, None, None, (
+            '송금 메모에 이메일, 전화번호 또는 주민등록번호를 입력할 수 없습니다.'
+        )
+    return recipient_username, amount, memo, None
+
+
+def get_wallet_balance(cursor, user_id):
+    balance_expression = wallet_balance_sql(':user_id')
+    row = cursor.execute(
+        f'SELECT {balance_expression} AS balance',
+        {'user_id': user_id},
+    ).fetchone()
+    return row['balance']
 
 
 def add_admin_action_audit(
@@ -2737,6 +3154,226 @@ def dashboard():
         user=g.current_user,
     )
 
+
+@app.route('/transfers', methods=['GET', 'POST'])
+@login_required
+def transfers():
+    if request.method == 'POST':
+        return create_transfer()
+
+    page = get_page_number()
+    db = get_db()
+    balance = get_wallet_balance(db, g.current_user['id'])
+    recipients = db.execute(
+        '''
+        SELECT id, username
+        FROM user
+        WHERE
+            id <> ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ORDER BY username, id
+        LIMIT ?
+        ''',
+        (g.current_user['id'], TRANSFER_RECIPIENT_LIMIT),
+    ).fetchall()
+    transfer_count = db.execute(
+        '''
+        SELECT COUNT(*)
+        FROM money_transfer
+        WHERE sender_id = ? OR recipient_id = ?
+        ''',
+        (g.current_user['id'], g.current_user['id']),
+    ).fetchone()[0]
+    pagination = build_pagination(transfer_count, page)
+    transfer_history = db.execute(
+        '''
+        SELECT
+            id,
+            sender_id,
+            recipient_id,
+            amount,
+            memo,
+            sender_username_snapshot,
+            recipient_username_snapshot,
+            created_at
+        FROM money_transfer
+        WHERE sender_id = ? OR recipient_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ? OFFSET ?
+        ''',
+        (
+            g.current_user['id'],
+            g.current_user['id'],
+            PAGE_SIZE,
+            (page - 1) * PAGE_SIZE,
+        ),
+    ).fetchall()
+    return render_template(
+        'transfers.html',
+        balance=balance,
+        recipients=recipients,
+        transfer_history=transfer_history,
+        transfer_request_id=str(uuid.uuid4()),
+        pagination=pagination,
+        user_id=g.current_user['id'],
+        transfer_max_amount=TRANSFER_MAX_AMOUNT,
+        transfer_memo_max_length=TRANSFER_MEMO_MAX_LENGTH,
+    )
+
+
+@csrf_protected
+def create_transfer():
+    request_id = normalize_uuid_identifier(
+        request.form.get('request_id', '')
+    )
+    (
+        recipient_username,
+        amount,
+        memo,
+        validation_error,
+    ) = validate_transfer_input(
+        request.form.get('recipient_username', ''),
+        request.form.get('amount', ''),
+        request.form.get('memo', ''),
+    )
+    if request_id is None or validation_error:
+        flash(validation_error or '송금 요청 정보를 확인해주세요.')
+        return redirect(url_for('transfers'))
+
+    db = get_db()
+    recipient = db.execute(
+        '''
+        SELECT id, username
+        FROM user
+        WHERE
+            username = ?
+            AND id <> ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ''',
+        (recipient_username, g.current_user['id']),
+    ).fetchone()
+    if recipient is None:
+        flash('받는 사용자를 확인해주세요.')
+        return redirect(url_for('transfers'))
+
+    current_password = request.form.get('current_password', '')
+    if not verify_sensitive_password(current_password):
+        flash('현재 비밀번호가 올바르지 않습니다.')
+        return redirect(url_for('transfers'))
+
+    now = int(time.time())
+    cursor = db.cursor()
+    user_allowed = consume_security_rate_limit(
+        cursor,
+        'transfer_user',
+        g.current_user['id'],
+        TRANSFER_USER_RATE_LIMIT,
+        TRANSFER_RATE_WINDOW_SECONDS,
+        now,
+    )
+    ip_allowed = consume_security_rate_limit(
+        cursor,
+        'transfer_ip',
+        get_client_ip_hash(),
+        TRANSFER_IP_RATE_LIMIT,
+        TRANSFER_RATE_WINDOW_SECONDS,
+        now,
+    )
+    db.commit()
+    if not user_allowed or not ip_allowed:
+        abort(429)
+
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        recipient = db.execute(
+            '''
+            SELECT id, username
+            FROM user
+            WHERE
+                id = ?
+                AND username = ?
+                AND deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+            ''',
+            (recipient['id'], recipient_username),
+        ).fetchone()
+        if recipient is None:
+            db.rollback()
+            flash('받는 사용자를 확인해주세요.')
+            return redirect(url_for('transfers'))
+
+        db.execute(
+            '''
+            INSERT INTO money_transfer (
+                id,
+                request_id,
+                sender_id,
+                recipient_id,
+                amount,
+                memo,
+                sender_username_snapshot,
+                recipient_username_snapshot,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                request_id,
+                g.current_user['id'],
+                recipient['id'],
+                amount,
+                memo,
+                g.current_user['username'],
+                recipient['username'],
+                now,
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError as error:
+        db.rollback()
+        error_message = str(error)
+        if 'money_transfer.request_id' in error_message:
+            existing_transfer = db.execute(
+                '''
+                SELECT sender_id
+                FROM money_transfer
+                WHERE request_id = ?
+                ''',
+                (request_id,),
+            ).fetchone()
+            if (
+                existing_transfer is not None
+                and existing_transfer['sender_id'] == g.current_user['id']
+            ):
+                flash('이미 처리된 송금 요청입니다.')
+                return redirect(url_for('transfers'))
+        if 'insufficient wallet balance' in error_message:
+            flash('송금할 수 있는 잔액이 부족합니다.')
+            return redirect(url_for('transfers'))
+        if 'wallet balance limit exceeded' in error_message:
+            flash('받는 사용자의 잔액 한도를 초과합니다.')
+            return redirect(url_for('transfers'))
+        abort(400)
+
+    flash('송금이 완료되었습니다.')
+    return redirect(url_for('transfers'))
+
+
 # 마이페이지: 로그인한 사용자의 계정 정보 조회와 소개글 업데이트
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
@@ -2840,10 +3477,14 @@ def delete_account():
         return redirect(url_for('profile'))
 
     user_id = g.current_user['id']
+    db = get_db()
+    if get_wallet_balance(db, user_id) != 0:
+        flash('회원 탈퇴 전에 학습용 잔액을 모두 송금해주세요.')
+        return redirect(url_for('profile'))
+
     anonymized_username = f'deleted-{user_id}'
     disabled_password = password_hasher.hash(secrets.token_urlsafe(48))
     deleted_at = int(time.time())
-    db = get_db()
     cursor = db.execute(
         '''
         UPDATE user

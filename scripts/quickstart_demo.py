@@ -14,6 +14,8 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ADMIN_USERNAME = 'quick_admin'
 USER_USERNAME = 'quick_user'
+RECIPIENT_USERNAME = 'quick_receiver'
+DEMO_WALLET_BALANCE = 100_000
 
 
 def generate_temporary_password():
@@ -41,9 +43,12 @@ def seed_demo_database(market):
     market.init_db()
     admin_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
-    product_id = str(uuid.uuid4())
+    recipient_id = str(uuid.uuid4())
+    apple_product_id = str(uuid.uuid4())
+    banana_product_id = str(uuid.uuid4())
     admin_password = generate_temporary_password()
     user_password = generate_temporary_password()
+    recipient_password = generate_temporary_password()
     created_at = int(time.time())
 
     connection = sqlite3.connect(market.DATABASE)
@@ -73,6 +78,36 @@ def seed_demo_database(market):
         )
         connection.execute(
             '''
+            INSERT INTO user (id, username, password, is_admin)
+            VALUES (?, ?, ?, 0)
+            ''',
+            (
+                recipient_id,
+                RECIPIENT_USERNAME,
+                market.password_hasher.hash(recipient_password),
+            ),
+        )
+        for wallet_user_id in (user_id, recipient_id):
+            connection.execute(
+                '''
+                INSERT INTO wallet_adjustment (
+                    id,
+                    user_id,
+                    amount,
+                    source_type,
+                    created_at
+                )
+                VALUES (?, ?, ?, 'quickstart_demo_credit', ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    wallet_user_id,
+                    DEMO_WALLET_BALANCE,
+                    created_at,
+                ),
+            )
+        connection.execute(
+            '''
             INSERT INTO admin_role_audit (
                 id,
                 operator_name,
@@ -99,11 +134,24 @@ def seed_demo_database(market):
             VALUES (?, ?, ?, ?, ?)
             ''',
             (
-                product_id,
-                '빠른 실행 신고 테스트 상품',
-                '관리자 상품 제재를 확인하기 위한 격리된 데모 상품입니다.',
-                10000,
+                apple_product_id,
+                '사과 한 상자',
+                '깨끗하게 보관한 중고거래 테스트용 사과 한 상자입니다.',
+                15000,
                 user_id,
+            ),
+        )
+        connection.execute(
+            '''
+            INSERT INTO product (id, title, description, price, seller_id)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (
+                banana_product_id,
+                '바나나 한 송이',
+                '송금과 상품 목록을 확인하기 위한 테스트용 바나나입니다.',
+                5000,
+                recipient_id,
             ),
         )
         report_targets = (
@@ -119,9 +167,9 @@ def seed_demo_database(market):
                 str(uuid.uuid4()),
                 'product',
                 None,
-                product_id,
-                '빠른 실행 상품 신고 처리 흐름을 확인합니다.',
-                product_id,
+                apple_product_id,
+                '사과 상품의 신고 처리 흐름을 확인합니다.',
+                apple_product_id,
             ),
         )
         for (
@@ -175,7 +223,11 @@ def seed_demo_database(market):
         'admin_password': admin_password,
         'user_username': USER_USERNAME,
         'user_password': user_password,
-        'product_id': product_id,
+        'recipient_username': RECIPIENT_USERNAME,
+        'recipient_password': recipient_password,
+        'wallet_balance': DEMO_WALLET_BALANCE,
+        'apple_product_id': apple_product_id,
+        'banana_product_id': banana_product_id,
     }
 
 
@@ -214,7 +266,20 @@ def main():
             f'일반 사용자 계정: {accounts["user_username"]} / '
             f'{accounts["user_password"]}'
         )
+        print(
+            f'송금 수신 계정: {accounts["recipient_username"]} / '
+            f'{accounts["recipient_password"]}'
+        )
+        print(
+            f'두 일반 계정의 학습용 송금 잔액: '
+            f'{accounts["wallet_balance"]:,}원'
+        )
         print(f'접속 주소: http://127.0.0.1:{arguments.port}')
+        print(f'송금 페이지: http://127.0.0.1:{arguments.port}/transfers')
+        print(
+            '간단 송금 테스트: quick_user로 로그인 → 송금 → '
+            'quick_receiver 선택'
+        )
         print(
             f'관리자 페이지: '
             f'http://127.0.0.1:{arguments.port}/admin'

@@ -80,8 +80,10 @@ SECURE_CODING_PYTHON="${CONDA_PREFIX}/bin/python"
   tests/test_quickstart_demo.py
 ```
 
-임시 DB 권한, 관리자·일반 사용자 생성, Argon2id 비밀번호 해시, 샘플 상품·신고,
-감사 기록과 외래키 무결성을 확인합니다.
+임시 DB 권한, 관리자 1명·일반 사용자 2명 생성, Argon2id 비밀번호 해시,
+학습용 송금 잔액, 샘플 상품·신고, 감사 기록과 외래키 무결성을 확인합니다.
+샘플 상품은 두 일반 사용자가 각각 판매하는 `사과 한 상자`와
+`바나나 한 송이`입니다.
 
 ## 5. 기능별 테스트
 
@@ -91,6 +93,7 @@ SECURE_CODING_PYTHON="${CONDA_PREFIX}/bin/python"
 | 회원 탈퇴 | `tests/test_account_deletion_security.py` |
 | 상품 | `tests/test_product_security.py` |
 | 신고 | `tests/test_report_security.py` |
+| 송금 | `tests/test_transfer_security.py` |
 | 전체 채팅 | `tests/test_chat_security.py` |
 | 1대1 채팅 | `tests/test_direct_chat_security.py` |
 | 관리자 | `tests/test_admin_moderation_security.py` |

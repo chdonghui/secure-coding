@@ -29,15 +29,17 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
         users = {
             row['username']: row
             for row in connection.execute(
-                'SELECT username, password, is_admin FROM user'
+                'SELECT id, username, password, is_admin FROM user'
             ).fetchall()
         }
         assert set(users) == {
             quickstart_demo.ADMIN_USERNAME,
             quickstart_demo.USER_USERNAME,
+            quickstart_demo.RECIPIENT_USERNAME,
         }
         assert users[accounts['admin_username']]['is_admin'] == 1
         assert users[accounts['user_username']]['is_admin'] == 0
+        assert users[accounts['recipient_username']]['is_admin'] == 0
         assert market.password_hasher.verify(
             users[accounts['admin_username']]['password'],
             accounts['admin_password'],
@@ -46,9 +48,44 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
             users[accounts['user_username']]['password'],
             accounts['user_password'],
         )
+        assert market.password_hasher.verify(
+            users[accounts['recipient_username']]['password'],
+            accounts['recipient_password'],
+        )
         assert connection.execute(
-            'SELECT COUNT(*) FROM product'
-        ).fetchone()[0] == 1
+            'SELECT COUNT(*) FROM wallet_adjustment'
+        ).fetchone()[0] == 2
+        for username in (
+            accounts['user_username'],
+            accounts['recipient_username'],
+        ):
+            assert market.get_wallet_balance(
+                connection,
+                users[username]['id'],
+            ) == quickstart_demo.DEMO_WALLET_BALANCE
+        assert market.get_wallet_balance(
+            connection,
+            users[accounts['admin_username']]['id'],
+        ) == 0
+        products = {
+            row['title']: row
+            for row in connection.execute(
+                '''
+                SELECT product.id, product.title, product.price, user.username
+                FROM product
+                JOIN user ON user.id = product.seller_id
+                '''
+            ).fetchall()
+        }
+        assert set(products) == {'사과 한 상자', '바나나 한 송이'}
+        assert products['사과 한 상자']['price'] == 15000
+        assert products['사과 한 상자']['username'] == (
+            accounts['user_username']
+        )
+        assert products['바나나 한 송이']['price'] == 5000
+        assert products['바나나 한 송이']['username'] == (
+            accounts['recipient_username']
+        )
         assert connection.execute(
             'SELECT COUNT(*) FROM report'
         ).fetchone()[0] == 2

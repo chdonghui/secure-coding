@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}송금{% endblock %}
+{% block content %}
+<h2>송금</h2>
+<p>
+  이 화면의 잔액과 송금은 보안 실습을 위한 학습용 데이터입니다.
+  실제 현금이나 계좌 잔액이 이동하지 않습니다.
+</p>
+<p><strong>현재 학습용 잔액: {{ balance }}원</strong></p>
+
+<h3>사용자에게 송금</h3>
+{% if recipients %}
+  <form method="post" action="{{ url_for('transfers') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input
+      type="hidden"
+      name="request_id"
+      value="{{ transfer_request_id }}"
+    >
+    <label for="recipient_username">받는 사용자</label>
+    <select id="recipient_username" name="recipient_username" required>
+      <option value="">선택하세요</option>
+      {% for recipient in recipients %}
+        <option value="{{ recipient.username }}">{{ recipient.username }}</option>
+      {% endfor %}
+    </select>
+    <br>
+    <label for="transfer_amount">송금액</label>
+    <input
+      id="transfer_amount"
+      type="number"
+      name="amount"
+      min="1"
+      max="{{ transfer_max_amount }}"
+      inputmode="numeric"
+      required
+    >
+    <br>
+    <label for="transfer_memo">메모</label>
+    <input
+      id="transfer_memo"
+      type="text"
+      name="memo"
+      maxlength="{{ transfer_memo_max_length }}"
+      autocomplete="off"
+    >
+    <br>
+    <label for="transfer_password">현재 비밀번호</label>
+    <input
+      id="transfer_password"
+      type="password"
+      name="current_password"
+      maxlength="128"
+      autocomplete="current-password"
+      required
+    >
+    <br>
+    <button type="submit">송금하기</button>
+  </form>
+{% else %}
+  <p>송금할 수 있는 다른 활성 사용자가 없습니다.</p>
+{% endif %}
+
+<h3>송금 내역</h3>
+{% if transfer_history %}
+  <ul>
+    {% for transfer in transfer_history %}
+      <li>
+        {% if transfer.sender_id == user_id %}
+          <strong>보냄</strong>
+          <p>받는 사용자: {{ transfer.recipient_username_snapshot }}</p>
+        {% else %}
+          <strong>받음</strong>
+          <p>보낸 사용자: {{ transfer.sender_username_snapshot }}</p>
+        {% endif %}
+        <p>금액: {{ transfer.amount }}원</p>
+        {% if transfer.memo %}
+          <p>메모: {{ transfer.memo }}</p>
+        {% endif %}
+        <p>처리 시각: {{ transfer.created_at }}</p>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>송금 내역이 없습니다.</p>
+{% endif %}
+<nav aria-label="송금 내역 페이지">
+  {% if pagination.has_previous %}
+    <a href="{{ url_for('transfers', page=pagination.page - 1) }}">이전</a>
+  {% endif %}
+  <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
+  {% if pagination.has_next %}
+    <a href="{{ url_for('transfers', page=pagination.page + 1) }}">다음</a>
+  {% endif %}
+</nav>
+{% endblock %}
