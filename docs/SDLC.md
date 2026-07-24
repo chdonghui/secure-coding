@@ -209,6 +209,25 @@ git diff --check
 - 추가 검증: 신규 가입 계정의 일반 사용자 고정과 관리자·사업자 회원 탈퇴 메뉴·경로
   차단을 확인했습니다.
 
+### 외부 HTTPS 실습 배포 및 종료 (`v6.2`, 2026-07-25)
+
+- 배포 소스: 커밋 `b199285`
+- 배포 방식: 저장소 밖의 빈 임시 SQLite DB와 무작위
+  `MARKET_SECRET_KEY`를 사용하는 로컬 Flask 서버를 ngrok HTTPS 터널로 공개
+- 보안 설정: `MARKET_COOKIE_SECURE=true`, `MARKET_REQUIRE_HTTPS=true`,
+  `MARKET_TRUSTED_PROXY_COUNT=1`, 할당된 ngrok Host만 신뢰
+- 배포 전 검증: 전체 테스트 `222 passed`
+- 배포 후 검증: 상품 목록·로그인 페이지 HTTP `200`, Socket.IO Handshake
+  HTTP `200`, CSP·HSTS·Secure/HttpOnly/SameSite 쿠키 확인
+- 데이터 보호: 기존 `market.db`를 사용하지 않았고 임시 DB 권한 `600` 확인
+- 제한사항: 검증된 운영 WSGI·영구 DB·중앙 Rate Limit 구성이 없는 실습용
+  임시 배포입니다. 로컬 애플리케이션 또는 ngrok 프로세스가 종료되면 URL을
+  사용할 수 없으며, 임시 URL은 문서에 고정하지 않습니다.
+- 종료 결과: Flask 서버와 ngrok 터널을 정상 종료하고 배포 포트가 닫힌 것을
+  확인했습니다. 기존 공개 URL은 HTTP `404`를 반환합니다.
+- 데이터 정리: 배포 전용 임시 SQLite DB와 임시 디렉터리를 영구 삭제했습니다.
+  기존 저장소의 `market.db`는 읽거나 변경하지 않았습니다.
+
 ### 세션·계정 간 인수인계 규칙
 
 다른 세션이나 계정에서 작업을 이어갈 때는 다음 순서를 지킵니다.
