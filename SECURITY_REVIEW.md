@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `1.6` |
+| Current Version | `1.7` |
 | Review Date | `2026-07-24` |
 | Review Type | 정적 코드, 데이터베이스 구조 및 자동 보안 테스트 |
 | Main Application | `app.py` |
@@ -104,6 +104,7 @@
 - 상품 등록
 - 상품 목록 조회
 - 상품 상세 조회
+- 로그인한 사용자의 등록 상품 관리 목록
 - 상품 소유자의 상품 수정 및 삭제
 
 ### 실시간 채팅
@@ -246,7 +247,7 @@
 
 #### XSS 방어
 
-- [x] 상품 목록과 상세 화면은 Jinja 자동 이스케이프를 사용한다.
+- [x] 상품 목록·관리·상세 화면은 Jinja 자동 이스케이프를 사용한다.
 - [x] 상품 입력은 HTML이 아닌 일반 텍스트로 취급하고 출력 시 이스케이프한다.
 - N/A: 상품 입력을 JavaScript 문맥에 직접 삽입하지 않는다.
 - N/A: HTML 입력을 허용하지 않으므로 HTML Sanitizer를 사용하지 않는다.
@@ -254,7 +255,8 @@
 
 현재 근거:
 
-- 상품 출력: `templates/dashboard.html`, `templates/view_product.html`
+- 상품 출력: `templates/dashboard.html`, `templates/manage_products.html`,
+  `templates/view_product.html`
 - 저장형 XSS 검증: `tests/test_product_security.py`의
   `test_product_output_escapes_script_markup`
 
@@ -262,6 +264,7 @@
 
 - [x] 상품 등록은 세션에 `user_id`가 있는 경우에만 허용한다.
 - [x] 세션의 `user_id`가 실제 사용자 레코드와 일치하는지 요청마다 확인한다.
+- [x] 등록 상품 관리 목록은 로그인 사용자의 `seller_id`와 일치하는 상품만 조회한다.
 - [x] 상품 수정은 서버에서 판매자 소유권을 확인한 뒤 허용한다.
 - [x] 상품 삭제는 서버에서 판매자 소유권을 확인한 뒤 허용한다.
 - [x] 수정·삭제 SQL에도 `seller_id` 조건을 다시 적용한다.
@@ -270,6 +273,7 @@
 
 - 로그인·실사용자 확인: `app.py`의 `load_and_validate_session`,
   `login_required`
+- 본인 상품 목록 조회: `app.py`의 `manage_products`
 - 판매자 확인: `app.py`의 `require_product_owner`
 - 수정·삭제 권한 테스트: `tests/test_product_security.py`
 
@@ -493,6 +497,7 @@
 
 | Version | Date | 변경 내용 |
 |---|---|---|
+| `1.7` | `2026-07-24` | 로그인 사용자 전용 등록 상품 관리 목록과 등록·상세·수정·CSRF 삭제 연결을 추가하고, 판매자 기준 조회 격리와 XSS 출력 방어를 검증. 전체 자동 테스트 119개 통과 |
 | `1.6` | `2026-07-24` | 본인 마이페이지 조회, 소개글 수정 유지, 재인증 기반 Argon2id 비밀번호 변경과 HTTP·Socket 전체 기존 세션 무효화 적용. 전체 자동 테스트 117개 통과 |
 | `1.5` | `2026-07-24` | Socket 세션·CSRF 인증, 메시지 검증, 서버 발신자 생성, 사용자·IP Rate Limiting, 반복 스팸·Origin·전송 크기 제한과 선택적 HTTPS/WSS 강제 적용. 전체 자동 테스트 108개 통과 |
 | `1.4` | `2026-07-24` | IP·사용자별 신고 시도 제한, 실패 감사 로그, 개인정보 입력 차단, 안전한 DB 백업·검증·복구 도구 및 감사 스키마 마이그레이션 적용. 전체 자동 테스트 88개 통과 |

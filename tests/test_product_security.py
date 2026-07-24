@@ -106,6 +106,41 @@ def setup_owner(client):
     login_user(client, OWNER_USERNAME)
 
 
+def test_product_management_requires_authenticated_user(client):
+    response = client.get('/products/manage')
+
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/login')
+
+
+def test_product_management_only_shows_current_users_products(client):
+    setup_owner(client)
+    owner_title = '<script>alert("owner-product")</script>'
+    create_product(client, title=owner_title)
+    owner_product = fetch_products()[0]
+
+    logout_user(client)
+    register_user(client, OTHER_USERNAME)
+    login_user(client, OTHER_USERNAME)
+    create_product(client, title='다른 사용자 상품')
+    other_product = next(
+        product
+        for product in fetch_products()
+        if product['seller_id'] != owner_product['seller_id']
+    )
+
+    page = client.get('/products/manage').get_data(as_text=True)
+
+    assert '다른 사용자 상품' in page
+    assert owner_title not in page
+    assert 'owner-product' not in page
+    assert owner_product['id'] not in page
+    assert other_product['id'] in page
+    assert f'/product/{other_product["id"]}/edit' in page
+    assert f'/product/{other_product["id"]}/delete' in page
+    assert 'name="csrf_token"' in page
+
+
 def test_product_registration_requires_authenticated_user(client):
     assert client.get('/product/new').headers['Location'].endswith('/login')
     response = client.post(
@@ -210,16 +245,21 @@ def test_product_output_escapes_script_markup(client):
     product = fetch_products()[0]
 
     dashboard = client.get('/dashboard').get_data(as_text=True)
+    management = client.get('/products/manage').get_data(as_text=True)
     detail = client.get(f'/product/{product["id"]}').get_data(as_text=True)
     edit = client.get(f'/product/{product["id"]}/edit').get_data(as_text=True)
     assert xss_title not in dashboard
+    assert xss_title not in management
     assert xss_title not in detail
     assert xss_title not in edit
+    assert xss_description not in management
     assert xss_description not in detail
     assert xss_description not in edit
     assert '&lt;script&gt;alert' in dashboard
+    assert '&lt;script&gt;alert' in management
     assert '&lt;script&gt;alert' in detail
     assert '&lt;script&gt;alert' in edit
+    assert '&lt;img src=x onerror=alert' in management
     assert '&lt;img src=x onerror=alert' in detail
     assert '&lt;img src=x onerror=alert' in edit
 
@@ -250,7 +290,7 @@ def test_owner_can_edit_and_delete_product(client):
         data={'csrf_token': token},
     )
     assert response.status_code == 302
-    assert response.headers['Location'].endswith('/dashboard')
+    assert response.headers['Location'].endswith('/products/manage')
     assert fetch_products() == []
 
 

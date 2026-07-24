@@ -1457,6 +1457,22 @@ def new_product_post():
     return redirect(url_for('view_product', product_id=product_id))
 
 
+# 등록 상품 관리
+@app.route('/products/manage')
+@login_required
+def manage_products():
+    products = get_db().execute(
+        '''
+        SELECT id, title, description, price, seller_id
+        FROM product
+        WHERE seller_id = ?
+        ORDER BY title, id
+        ''',
+        (g.current_user['id'],),
+    ).fetchall()
+    return render_template('manage_products.html', products=products)
+
+
 # 상품 상세보기
 @app.route('/product/<product_id>')
 def view_product(product_id):
@@ -1542,7 +1558,7 @@ def delete_product(product_id):
         return redirect(url_for('view_product', product_id=product['id']))
 
     flash('상품이 삭제되었습니다.')
-    return redirect(url_for('dashboard'))
+    return redirect(url_for('manage_products'))
 
 
 # 신고하기

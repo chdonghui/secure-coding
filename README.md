@@ -1,8 +1,8 @@
 # 안전한 중고거래 플랫폼
 
 Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입니다. 회원가입,
-로그인, 마이페이지, 상품 등록·조회·수정·삭제, 실시간 채팅 및 신고 기능을
-포함합니다.
+로그인, 마이페이지, 상품 등록·조회·수정·삭제와 내 상품 관리, 실시간 채팅 및
+신고 기능을 포함합니다.
 
 이 프로젝트는 [ugonfor/secure-coding](https://github.com/ugonfor/secure-coding)
 저장소에서 가져온 기반 코드를 바탕으로 보안 취약점을 분석하고 개선하는 실습용
@@ -13,7 +13,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `1.6`
+- 현재 버전: `1.7`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
 - 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
