@@ -16,10 +16,10 @@
   <button type="submit">검색</button>
 </form>
 
-{% if session.get('user_id') %}
+{% if g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'business' %}
   <p><a href="{{ url_for('new_product') }}">새 상품 등록</a></p>
-{% else %}
-  <p>상품 등록과 채팅은 로그인 후 사용할 수 있습니다.</p>
+{% elif not session.get('user_id') %}
+  <p>채팅은 로그인 후 사용할 수 있습니다.</p>
 {% endif %}
 
 {% if products %}

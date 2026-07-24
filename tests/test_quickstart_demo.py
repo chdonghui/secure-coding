@@ -89,7 +89,7 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
         assert set(products) == {'사과 한 상자', '바나나 한 송이'}
         assert products['사과 한 상자']['price'] == 15000
         assert products['사과 한 상자']['username'] == (
-            accounts['user_username']
+            accounts['business_username']
         )
         assert products['바나나 한 송이']['price'] == 5000
         assert products['바나나 한 송이']['username'] == accounts['business_username']

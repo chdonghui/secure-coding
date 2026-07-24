@@ -83,6 +83,10 @@ def transfer_database(tmp_path, monkeypatch):
             'UPDATE user SET is_admin = 1 WHERE id = ?',
             (ADMIN_ID,),
         )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (RECIPIENT_ID,),
+        )
         now = int(time.time())
         for user_id, amount in (
             (SENDER_ID, INITIAL_SENDER_BALANCE),
@@ -185,8 +189,9 @@ def test_transfer_page_requires_login_and_lists_only_active_counterparties(
     page = client.get('/transfers').get_data(as_text=True)
     assert '현재 학습용 잔액: 100000원' in page
     assert f'value="{RECIPIENT_USERNAME}"' in page
-    assert f'value="{OUTSIDER_USERNAME}"' in page
+    assert f'value="{OUTSIDER_USERNAME}"' not in page
     assert f'value="{SENDER_USERNAME}"' not in page
+    assert '사업자에게 송금' in page
     assert SENDER_PASSWORD not in page
 
     admin, _ = authenticated_client(ADMIN_ID)
@@ -252,9 +257,7 @@ def test_transfer_is_atomic_and_history_is_private_and_minimal(
     assert '받는 사용자: transfer_recipient' not in sender_page
 
     recipient, _ = authenticated_client(RECIPIENT_ID)
-    recipient_page = recipient.get('/transfers').get_data(as_text=True)
-    assert '금액: 12500원' in recipient_page
-    assert '보낸 사용자: transfer_sender' not in recipient_page
+    assert recipient.get('/transfers').status_code == 403
 
     outsider, _ = authenticated_client(OUTSIDER_ID)
     outsider_page = outsider.get('/transfers').get_data(as_text=True)
@@ -262,22 +265,18 @@ def test_transfer_is_atomic_and_history_is_private_and_minimal(
     assert memo not in outsider_page
 
 
-def test_regular_users_can_transfer_in_both_directions(transfer_database):
+def test_regular_users_cannot_transfer_to_each_other(transfer_database):
     sender, sender_token = authenticated_client(SENDER_ID)
-    send_transfer(sender, sender_token, amount='10000')
-
-    recipient, recipient_token = authenticated_client(RECIPIENT_ID)
-    send_transfer(
-        recipient,
-        recipient_token,
-        recipient_username=SENDER_USERNAME,
-        amount='3000',
-        current_password=RECIPIENT_PASSWORD,
+    response = send_transfer(
+        sender,
+        sender_token,
+        recipient_username=OUTSIDER_USERNAME,
     )
 
-    assert fetch_balance(SENDER_ID) == 93_000
-    assert fetch_balance(RECIPIENT_ID) == 8_000
-    assert fetch_transfer_count() == 2
+    assert response.status_code == 302
+    assert fetch_balance(SENDER_ID) == INITIAL_SENDER_BALANCE
+    assert fetch_balance(OUTSIDER_ID) == 0
+    assert fetch_transfer_count() == 0
 
 
 def test_admin_cannot_be_a_transfer_participant_at_database_boundary(
@@ -325,6 +324,35 @@ def test_admin_cannot_be_a_transfer_participant_at_database_boundary(
                     ADMIN_ID,
                     SENDER_USERNAME,
                     ADMIN_USERNAME,
+                    int(time.time()),
+                ),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match='invalid transfer participant',
+        ):
+            connection.execute(
+                '''
+                INSERT INTO money_transfer (
+                    id,
+                    request_id,
+                    sender_id,
+                    recipient_id,
+                    amount,
+                    memo,
+                    sender_username_snapshot,
+                    recipient_username_snapshot,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, 1, '', ?, ?, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    str(uuid.uuid4()),
+                    SENDER_ID,
+                    OUTSIDER_ID,
+                    SENDER_USERNAME,
+                    OUTSIDER_USERNAME,
                     int(time.time()),
                 ),
             )
@@ -377,6 +405,7 @@ def test_transfer_rejects_deleted_recipient_and_insufficient_balance(
     transfer_database,
 ):
     client, token = authenticated_client()
+    request_id = transfer_request_id(client)
     connection = sqlite3.connect(market.DATABASE)
     try:
         connection.execute(
@@ -386,7 +415,7 @@ def test_transfer_rejects_deleted_recipient_and_insufficient_balance(
         connection.commit()
     finally:
         connection.close()
-    response = send_transfer(client, token)
+    response = send_transfer(client, token, request_id=request_id)
     assert response.status_code == 302
     assert fetch_transfer_count() == 0
 

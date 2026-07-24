@@ -83,6 +83,18 @@ def fetch_products():
         connection.close()
 
 
+def grant_business_role(username):
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE username = ?",
+            (username,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def create_product(
     client,
     title='안전한 상품',
@@ -103,6 +115,7 @@ def create_product(
 
 def setup_owner(client):
     register_user(client, OWNER_USERNAME)
+    grant_business_role(OWNER_USERNAME)
     login_user(client, OWNER_USERNAME)
 
 
@@ -121,6 +134,7 @@ def test_product_management_only_shows_current_users_products(client):
 
     logout_user(client)
     register_user(client, OTHER_USERNAME)
+    grant_business_role(OTHER_USERNAME)
     login_user(client, OTHER_USERNAME)
     create_product(client, title='다른 사용자 상품')
     other_product = next(
@@ -154,6 +168,41 @@ def test_product_registration_requires_authenticated_user(client):
     assert response.status_code == 302
     assert response.headers['Location'].endswith('/login')
     assert fetch_products() == []
+
+
+def test_product_registration_and_management_require_business_role(client):
+    register_user(client, OWNER_USERNAME)
+    login_user(client, OWNER_USERNAME)
+
+    dashboard = client.get('/dashboard').get_data(as_text=True)
+    catalog = client.get('/products').get_data(as_text=True)
+    base_page = client.get('/profile').get_data(as_text=True)
+    assert '새 상품 등록' not in dashboard
+    assert '/product/new' not in catalog
+    assert '내 상품 관리' not in base_page
+    assert client.get('/product/new').status_code == 403
+    assert client.get('/products/manage').status_code == 403
+
+    token = get_csrf_token(client, '/profile')
+    response = client.post(
+        '/product/new',
+        data={
+            'csrf_token': token,
+            'title': '일반 사용자 상품',
+            'description': '등록되면 안 됩니다.',
+            'price': '1000',
+        },
+    )
+    assert response.status_code == 403
+    assert fetch_products() == []
+
+    logout_user(client)
+    grant_business_role(OWNER_USERNAME)
+    login_user(client, OWNER_USERNAME)
+    assert client.get('/product/new').status_code == 200
+    assert client.get('/products/manage').status_code == 200
+    assert '새 상품 등록' in client.get('/dashboard').get_data(as_text=True)
+    assert '내 상품 관리' in client.get('/profile').get_data(as_text=True)
 
 
 def test_product_catalog_is_public_but_management_requires_login(client):

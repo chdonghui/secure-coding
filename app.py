@@ -475,7 +475,7 @@ def ensure_purchase_order_schema(cursor):
                     AND product.price = NEW.amount
                     AND seller.username = NEW.seller_username_snapshot
                     AND seller.is_admin = 0
-                    AND seller.account_type IN ('user', 'business')
+                    AND seller.account_type = 'business'
                     AND seller.deleted_at IS NULL
                     AND NOT EXISTS (
                         SELECT 1
@@ -711,7 +711,7 @@ def ensure_transfer_schema(cursor):
                 WHERE
                     user.id = NEW.recipient_id
                     AND user.is_admin = 0
-                    AND user.account_type = 'user'
+                    AND user.account_type = 'business'
                     AND user.username = NEW.recipient_username_snapshot
                     AND user.deleted_at IS NULL
                     AND NOT EXISTS (
@@ -1431,6 +1431,33 @@ def ensure_direct_message_schema(cursor):
         CREATE INDEX IF NOT EXISTS direct_message_recipient_sender_created
         ON direct_message (recipient_id, sender_id, created_at, id)
     """)
+    cursor.execute('DROP TRIGGER IF EXISTS validate_direct_message_roles')
+    cursor.execute("""
+        CREATE TRIGGER validate_direct_message_roles
+        BEFORE INSERT ON direct_message
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user AS sender
+            JOIN user AS recipient
+                ON recipient.id = NEW.recipient_id
+            WHERE
+                sender.id = NEW.sender_id
+                AND (
+                    CASE
+                        WHEN sender.is_admin = 1 THEN 'admin'
+                        ELSE sender.account_type
+                    END
+                ) <> (
+                    CASE
+                        WHEN recipient.is_admin = 1 THEN 'admin'
+                        ELSE recipient.account_type
+                    END
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'direct chat role pair is not allowed');
+        END
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_block (
             blocker_id TEXT NOT NULL,
@@ -1809,6 +1836,28 @@ def create_report_review_table(cursor):
 
 
 def ensure_report_schema_objects(cursor):
+    cursor.execute('DROP TRIGGER IF EXISTS validate_reporter_role')
+    cursor.execute("""
+        CREATE TRIGGER validate_reporter_role
+        BEFORE INSERT ON report
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.reporter_id
+                AND user.is_admin = 0
+                AND user.account_type = 'user'
+                AND user.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'regular user reporter required');
+        END
+    """)
     cursor.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS report_unique_user_target
         ON report (reporter_id, target_user_id)
@@ -3097,13 +3146,23 @@ def users_are_blocked(first_user_id, second_user_id):
     ).fetchone() is not None
 
 
+def direct_chat_role(user):
+    if user['is_admin'] == 1:
+        return 'admin'
+    return user['account_type']
+
+
+def direct_chat_roles_are_allowed(first_user, second_user):
+    return direct_chat_role(first_user) != direct_chat_role(second_user)
+
+
 def get_chat_recipient_or_404(recipient_id):
     normalized_recipient_id = normalize_uuid_identifier(recipient_id)
     if normalized_recipient_id is None:
         abort(404)
     recipient = get_db().execute(
         '''
-        SELECT id, username
+        SELECT id, username, is_admin, account_type
         FROM user
         WHERE
             id = ?
@@ -3118,6 +3177,8 @@ def get_chat_recipient_or_404(recipient_id):
     ).fetchone()
     if recipient is None or recipient['id'] == g.current_user['id']:
         abort(404)
+    if not direct_chat_roles_are_allowed(g.current_user, recipient):
+        abort(403)
     return recipient
 
 
@@ -3438,7 +3499,7 @@ def transfers():
         WHERE
             id <> ?
             AND is_admin = 0
-            AND account_type = 'user'
+            AND account_type = 'business'
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3525,7 +3586,7 @@ def create_transfer():
             username = ?
             AND id <> ?
             AND is_admin = 0
-            AND account_type = 'user'
+            AND account_type = 'business'
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3536,7 +3597,7 @@ def create_transfer():
         (recipient_username, g.current_user['id']),
     ).fetchone()
     if recipient is None:
-        flash('받는 사용자를 확인해주세요.')
+        flash('받는 사업자를 확인해주세요.')
         return redirect(url_for('transfers'))
 
     current_password = request.form.get('current_password', '')
@@ -3576,7 +3637,7 @@ def create_transfer():
                 id = ?
                 AND username = ?
                 AND is_admin = 0
-                AND account_type = 'user'
+                AND account_type = 'business'
                 AND deleted_at IS NULL
                 AND NOT EXISTS (
                     SELECT 1
@@ -3588,7 +3649,7 @@ def create_transfer():
         ).fetchone()
         if recipient is None:
             db.rollback()
-            flash('받는 사용자를 확인해주세요.')
+            flash('받는 사업자를 확인해주세요.')
             return redirect(url_for('transfers'))
 
         db.execute(
@@ -3803,7 +3864,10 @@ def delete_account():
 @app.route('/product/new', methods=['GET', 'POST'])
 @login_required
 def new_product():
-    if g.current_user['is_admin'] == 1:
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'business'
+    ):
         abort(403)
     if request.method == 'POST':
         return new_product_post()
@@ -3861,7 +3925,10 @@ def new_product_post():
 @app.route('/products/manage')
 @login_required
 def manage_products():
-    if g.current_user['is_admin'] == 1:
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'business'
+    ):
         abort(403)
     page = get_page_number()
     db = get_db()
@@ -3908,7 +3975,7 @@ def view_product(product_id):
     # 판매자 정보 조회
     seller = db.execute(
         '''
-        SELECT id, username
+        SELECT id, username, account_type
         FROM user
         WHERE
             id = ?
@@ -4004,6 +4071,7 @@ def purchase_product(product_id):
                 AND product.seller_id <> ?
                 AND product.price >= ?
                 AND seller.is_admin = 0
+                AND seller.account_type = 'business'
                 AND seller.deleted_at IS NULL
                 AND NOT EXISTS (
                     SELECT 1
@@ -4143,7 +4211,10 @@ def orders():
 @app.route('/product/<product_id>/edit', methods=['GET', 'POST'])
 @login_required
 def edit_product(product_id):
-    if g.current_user['is_admin'] == 1:
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'business'
+    ):
         abort(403)
     product = get_product_or_404(product_id)
     require_product_owner(product)
@@ -4208,7 +4279,10 @@ def edit_product_post(product):
 @login_required
 @csrf_protected
 def delete_product(product_id):
-    if g.current_user['is_admin'] == 1:
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'business'
+    ):
         abort(403)
     product = get_product_or_404(product_id)
     require_product_owner(product)
@@ -4769,14 +4843,18 @@ def admin_review_report(report_id):
 @app.route('/chat')
 @login_required
 def direct_chat_users():
-    if g.current_user['is_admin'] == 1:
-        abort(403)
     page = get_page_number()
     db = get_db()
     user_filter = '''
         FROM user
         WHERE
             id <> ?
+            AND (
+                CASE
+                    WHEN user.is_admin = 1 THEN 'admin'
+                    ELSE user.account_type
+                END
+            ) <> ?
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -4786,7 +4864,7 @@ def direct_chat_users():
     '''
     total_items = db.execute(
         f'SELECT COUNT(*) {user_filter}',
-        (g.current_user['id'],),
+        (g.current_user['id'], direct_chat_role(g.current_user)),
     ).fetchone()[0]
     pagination = build_pagination(
         total_items,
@@ -4819,6 +4897,7 @@ def direct_chat_users():
             g.current_user['id'],
             g.current_user['id'],
             g.current_user['id'],
+            direct_chat_role(g.current_user),
             DIRECT_CHAT_USER_LIST_LIMIT,
             (page - 1) * DIRECT_CHAT_USER_LIST_LIMIT,
         ),
@@ -4834,8 +4913,6 @@ def direct_chat_users():
 @app.route('/chat/<recipient_id>')
 @login_required
 def direct_chat(recipient_id):
-    if g.current_user['is_admin'] == 1:
-        abort(403)
     recipient = get_chat_recipient_or_404(recipient_id)
     page = get_page_number()
     db = get_db()
@@ -4956,18 +5033,25 @@ def unblock_chat_user(recipient_id):
 @app.route('/report', methods=['GET', 'POST'])
 @login_required
 def report():
-    if request.method == 'POST':
-        if g.current_user['is_admin'] == 1:
-            abort(403)
-        return report_post()
     if g.current_user['is_admin'] == 1:
+        if request.method == 'POST':
+            abort(403)
         reports = get_received_reports()
         return render_template('report.html', reports=reports)
+    if g.current_user['account_type'] != 'user':
+        abort(403)
+    if request.method == 'POST':
+        return report_post()
     return render_template('report.html')
 
 
 @csrf_protected
 def report_post():
+    if (
+        g.current_user['is_admin'] == 1
+        or g.current_user['account_type'] != 'user'
+    ):
+        abort(403)
     db = get_db()
     cursor = db.cursor()
     now = int(time.time())
@@ -5151,7 +5235,7 @@ def get_authenticated_socket_user():
 
     user = get_db().execute(
         '''
-        SELECT id, username, is_admin, session_version
+        SELECT id, username, is_admin, account_type, session_version
         FROM user
         WHERE
             id = ?
@@ -5312,8 +5396,6 @@ def handle_socket_connect(auth=None):
     user = get_authenticated_socket_user()
     if user is None:
         return False
-    if user['is_admin'] == 1:
-        return False
     db = get_db()
     connection_allowed = consume_security_rate_limit(
         db.cursor(),
@@ -5405,14 +5487,6 @@ def handle_send_direct_message_event(data):
             event_name='direct_chat_error',
         )
 
-    if user['is_admin'] == 1:
-        return reject_chat_event(
-            'administrator_chat_disabled',
-            '관리자 계정에서는 1대1 채팅을 사용할 수 없습니다.',
-            should_disconnect=True,
-            event_name='direct_chat_error',
-        )
-
     rate_limit_time = time.monotonic()
     if not consume_chat_rate_limit(
         user['id'],
@@ -5442,7 +5516,7 @@ def handle_send_direct_message_event(data):
     db = get_db()
     recipient = db.execute(
         '''
-        SELECT id
+        SELECT id, username, is_admin, account_type
         FROM user
         WHERE
             id = ?
@@ -5459,6 +5533,12 @@ def handle_send_direct_message_event(data):
         return reject_chat_event(
             'invalid_recipient',
             '대화 상대를 확인할 수 없습니다.',
+            event_name='direct_chat_error',
+        )
+    if not direct_chat_roles_are_allowed(user, recipient):
+        return reject_chat_event(
+            'recipient_not_allowed',
+            '같은 역할의 계정끼리는 1대1 채팅을 할 수 없습니다.',
             event_name='direct_chat_error',
         )
 

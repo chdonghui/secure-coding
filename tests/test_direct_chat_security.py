@@ -19,10 +19,16 @@ SENDER_ID = '00000000-0000-0000-0000-000000000401'
 RECIPIENT_ID = '00000000-0000-0000-0000-000000000402'
 OUTSIDER_ID = '00000000-0000-0000-0000-000000000403'
 UNKNOWN_ID = '00000000-0000-0000-0000-000000000404'
+SAME_ROLE_ID = '00000000-0000-0000-0000-000000000405'
+SECOND_BUSINESS_ID = '00000000-0000-0000-0000-000000000406'
+SECOND_ADMIN_ID = '00000000-0000-0000-0000-000000000407'
 USERS = (
     (SENDER_ID, 'direct_sender', 'sender-private-bio'),
     (RECIPIENT_ID, 'direct_recipient', 'recipient-private-bio'),
     (OUTSIDER_ID, 'direct_outsider', 'outsider-private-bio'),
+    (SAME_ROLE_ID, 'direct_same_role', 'same-role-private-bio'),
+    (SECOND_BUSINESS_ID, 'direct_second_business', 'business-private-bio'),
+    (SECOND_ADMIN_ID, 'direct_second_admin', 'admin-private-bio'),
 )
 
 
@@ -58,6 +64,22 @@ def direct_chat_database(tmp_path, monkeypatch):
                     bio,
                 ),
             )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (RECIPIENT_ID,),
+        )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (SECOND_BUSINESS_ID,),
+        )
+        connection.execute(
+            'UPDATE user SET is_admin = 1 WHERE id = ?',
+            (OUTSIDER_ID,),
+        )
+        connection.execute(
+            'UPDATE user SET is_admin = 1 WHERE id = ?',
+            (SECOND_ADMIN_ID,),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -165,10 +187,93 @@ def test_user_list_exposes_only_other_users_public_names(
     assert 'direct_recipient' in page
     assert 'direct_outsider' in page
     assert 'direct_sender' not in page
+    assert 'direct_same_role' not in page
     assert 'private-bio' not in page
     assert '$argon2' not in page
     assert RECIPIENT_ID in page
     assert OUTSIDER_ID in page
+
+
+def test_each_different_role_pair_can_exchange_direct_messages(
+    direct_chat_database,
+):
+    allowed_pairs = (
+        (OUTSIDER_ID, RECIPIENT_ID, '관리자에서 사업자'),
+        (SENDER_ID, OUTSIDER_ID, '일반 사용자에서 관리자'),
+        (SENDER_ID, RECIPIENT_ID, '일반 사용자에서 사업자'),
+    )
+
+    for sender_id, recipient_id, message in allowed_pairs:
+        sender_http = authenticated_client(sender_id)
+        assert sender_http.get(f'/chat/{recipient_id}').status_code == 200
+        sender_socket = connect_socket(sender_http, sender_id)
+        result = sender_socket.emit(
+            'send_direct_message',
+            {'recipient_id': recipient_id, 'message': message},
+            callback=True,
+        )
+        assert result['ok'] is True
+        sender_socket.disconnect()
+
+    assert len(fetch_direct_messages()) == len(allowed_pairs)
+
+
+def test_same_role_direct_chat_is_rejected_by_http_socket_and_database(
+    direct_chat_database,
+):
+    sender_http = authenticated_client(SENDER_ID)
+    assert sender_http.get(f'/chat/{SAME_ROLE_ID}').status_code == 403
+
+    sender_socket = connect_socket(sender_http, SENDER_ID)
+    result = sender_socket.emit(
+        'send_direct_message',
+        {'recipient_id': SAME_ROLE_ID, 'message': '같은 역할 대화 시도'},
+        callback=True,
+    )
+    assert result == {'ok': False, 'error': 'recipient_not_allowed'}
+    assert fetch_direct_messages() == []
+    sender_socket.disconnect()
+
+    connection = sqlite3.connect(market.DATABASE)
+    connection.execute('PRAGMA foreign_keys = ON')
+    try:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match='direct chat role pair is not allowed',
+        ):
+            connection.execute(
+                '''
+                INSERT INTO direct_message (
+                    id, sender_id, recipient_id, message, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    SENDER_ID,
+                    SAME_ROLE_ID,
+                    'DB 우회 시도',
+                    1,
+                ),
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ('current_user_id', 'same_role_user_id'),
+    [
+        (SENDER_ID, SAME_ROLE_ID),
+        (RECIPIENT_ID, SECOND_BUSINESS_ID),
+        (OUTSIDER_ID, SECOND_ADMIN_ID),
+    ],
+)
+def test_each_same_role_pair_is_rejected(
+    direct_chat_database,
+    current_user_id,
+    same_role_user_id,
+):
+    client = authenticated_client(current_user_id)
+    assert client.get(f'/chat/{same_role_user_id}').status_code == 403
 
 
 @pytest.mark.parametrize(

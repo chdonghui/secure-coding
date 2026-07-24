@@ -17,8 +17,83 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `6.2` | `2026-07-24` | 사업자 전용 상품·송금 수취, 일반 사용자 전용 신고, 관리자 삭제 확인 UI, 역할 간 1대1 채팅 | 자동 테스트 222개 통과 |
 | `6.1` | `2026-07-24` | 관리자 기능 최소 권한, 관리자 채팅·상품 경로 차단, 신고 접수함·관리 삭제 재인증, 가입·탈퇴 권한 고정 | 자동 테스트 215개 통과 |
 | `6.0` | `2026-07-24` | 사업자 역할 스키마·감사 무결성, 판매 전용 권한, 관리자 전환 보호 | 자동 테스트 210개 통과 |
+
+## Version 6.2
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `6.2` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | 사업자 전용 상품 관리·송금 수취, 일반 사용자 전용 신고, 관리자 삭제 확인 UI, 역할 간 1대1 채팅 |
+| 테스트 결과 | `222 passed`, `pip check` |
+
+### Version 6.1과의 조치 전후 비교
+
+| 항목 | Version 6.1 | Version 6.2 |
+|---|---|---|
+| 상품 등록·관리 | 관리자만 제외 | 사업자만 등록·목록·수정·일반 삭제 가능 |
+| 관리자 상품 삭제 | 입력 폼 상시 표시 | `관리 삭제` 클릭 후 사유·비밀번호·확인 버튼 표시 |
+| 1대1 채팅 | 관리자 차단, 비관리자 간 대화 | 서로 다른 역할 조합만 허용 |
+| 채팅 DB 무결성 | 참여자·메시지 형식 검증 | 같은 역할 메시지 INSERT Trigger 차단 추가 |
+| 송금 방향 | 일반 사용자끼리 양방향 | 일반 사용자 발신·사업자 수취만 허용 |
+| 신고 접수 | 비관리자 계정에 제공 | 일반 사용자만 접수하고 사업자 메뉴·경로·DB INSERT 차단 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드·테스트 근거 |
+|---|---|---|---|
+| `V6.2-PRODUCT-ROLE-01` | 판매자 권한 고정 | 상품 등록·관리·수정·일반 삭제를 `account_type='business'` 사업자에게만 허용 | `new_product`, `manage_products`, `edit_product`, `delete_product`, 상품 역할 테스트 |
+| `V6.2-PRODUCT-MENU-02` | 메뉴 최소화 | 일반 사용자·관리자에게 새 상품 등록과 내 상품 관리 메뉴를 표시하지 않음 | 상품·대시보드·공통·상세 템플릿, 메뉴 테스트 |
+| `V6.2-ADMIN-DELETE-03` | 단계적 관리 삭제 | 상품 목록의 버튼 클릭 후 사유·현재 비밀번호 폼을 열고 CSRF·재인증 후 논리 삭제 | `templates/admin_dashboard.html`, `admin_remove_product`, 관리자 테스트 |
+| `V6.2-CHAT-ROLE-04` | 역할 간 대화 허용 | 관리자↔사업자, 일반↔관리자, 일반↔사업자만 목록·HTTP·Socket에서 허용 | `direct_chat_role`, `direct_chat_roles_are_allowed`, 역할 조합 테스트 |
+| `V6.2-CHAT-DB-05` | DB 우회 차단 | 같은 역할 간 `direct_message` INSERT를 Trigger로 거부 | `validate_direct_message_roles`, DB 직접 INSERT 테스트 |
+| `V6.2-TRANSFER-BUSINESS-06` | 송금 방향 고정 | 일반 사용자 발신·사업자 수취만 허용하고 일반 사용자끼리의 목록·POST·DB 우회를 차단 | `transfers`, `create_transfer`, `validate_money_transfer_participants`, 송금 테스트 |
+| `V6.2-PURCHASE-BUSINESS-07` | 판매 대금 수취 | 일반 사용자의 상품 구매 대금을 사업자 판매자에게만 지급 | `purchase_product`, `validate_purchase_order`, 구매 테스트 |
+| `V6.2-REPORT-USER-08` | 신고자 역할 고정 | 일반 사용자만 신고하고 사업자 메뉴·GET·POST·DB INSERT를 차단 | `report`, `report_post`, `validate_reporter_role`, 신고 역할 테스트 |
+| `V6.2-REPORT-OWNER-09` | 자기 상품 신고 차단 | 신고자와 상품 판매자 ID를 서버와 DB Trigger에서 비교해 동일하면 거부 | `validate_report_input`, `prevent_own_product_report_insert`, 자기 상품 테스트 |
+
+### 데이터베이스 변경과 마이그레이션
+
+새 테이블·컬럼은 추가하지 않았습니다. `init_db()`가 기존 1대1 메시지를 보존한 채
+`validate_direct_message_roles` Trigger를 재생성합니다. 기존 송금 참여자 Trigger는
+일반 사용자 발신·사업자 수취만 허용하도록 재생성합니다. 기존 원장과 메시지는
+변경하거나 삭제하지 않습니다. `validate_reporter_role` Trigger를 재생성해 새
+신고의 신고자 역할을 일반 사용자로 고정하며 기존 신고는 보존합니다.
+
+### 템플릿, 의존성 및 환경변수 변경
+
+상품 목록·대시보드·공통 메뉴·내 상품 관리·상품 상세·사업자 송금과 관리자
+페이지 템플릿을 변경했습니다. 관리자 삭제 입력 영역은 CSP nonce가 적용된 로컬
+스크립트로 열고 닫습니다. 의존성·잠금 파일·환경변수 변경은 없습니다.
+
+### 테스트 명령과 결과
+
+```sh
+conda activate secure_coding
+MARKET_SECRET_KEY='test-only-secret-key-at-least-32-chars' python -m pytest -q
+python -m pip check
+```
+
+역할·상품·관리·채팅 집중 테스트 `139 passed`, 전체 테스트 `222 passed`.
+사업자 등록·관리 성공, 일반 사용자·관리자 우회 실패, 삭제 입력 단계와 재인증,
+허용된 역할 조합 대화, 같은 역할의 HTTP·Socket·DB 우회 실패를 검증했습니다.
+송금·구매·상품 집중 테스트 `60 passed`로 일반 사용자→사업자 성공과
+일반 사용자끼리의 UI·서버·DB 우회 실패도 확인했습니다.
+신고·관리·빠른 실행·송금·구매 집중 테스트 `83 passed`로 사업자 신고 메뉴·경로·
+DB 우회와 자기 상품 신고 차단도 확인했습니다.
+
+### 다음 버전에 남은 보안 항목
+
+기존 일반 사용자 소유 상품의 사업자 전환 전 관리 정책과 관리자 삭제 복구·이중
+승인 절차는 후속 설계가 필요합니다. 운영 환경의 중앙 권한·감사 모니터링도 별도
+검토 대상입니다.
+
 
 ## Version 6.1
 

@@ -104,6 +104,10 @@ def account_deletion_database(tmp_path, monkeypatch):
             (BUSINESS_ID,),
         )
         connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (RECIPIENT_ID,),
+        )
+        connection.execute(
             '''
             INSERT INTO product (id, title, description, price, seller_id)
             VALUES (?, ?, ?, ?, ?)

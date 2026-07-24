@@ -152,7 +152,7 @@ def seed_demo_database(market):
                 '사과 한 상자',
                 '깨끗하게 보관한 중고거래 테스트용 사과 한 상자입니다.',
                 15000,
-                user_id,
+                business_id,
             ),
         )
         connection.execute(
@@ -209,7 +209,7 @@ def seed_demo_database(market):
                 ''',
                 (
                     report_id,
-                    admin_id,
+                    recipient_id,
                     target_type,
                     target_user_id,
                     target_product_id,
@@ -220,7 +220,7 @@ def seed_demo_database(market):
             market.add_report_audit_log(
                 connection,
                 'report_created',
-                admin_id,
+                recipient_id,
                 target_type,
                 audit_target_id,
                 created_at,
@@ -287,7 +287,7 @@ def main():
             f'{accounts["recipient_password"]}'
         )
         print(
-            f'사업자 계정(판매 전용): {accounts["business_username"]} / '
+            f'사업자 계정(판매·수취 전용): {accounts["business_username"]} / '
             f'{accounts["business_password"]}'
         )
         print(
@@ -297,8 +297,8 @@ def main():
         print(f'접속 주소: http://127.0.0.1:{arguments.port}')
         print(f'송금 페이지: http://127.0.0.1:{arguments.port}/transfers')
         print(
-            '간단 송금 테스트: user1로 로그인 → 송금 → user2 선택 '
-            '(반대 방향도 가능)'
+            '간단 송금 테스트: user1로 로그인 → 사업자 송금 → '
+            'business_demo 선택'
         )
         print(
             f'관리자 페이지: '

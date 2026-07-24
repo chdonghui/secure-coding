@@ -140,19 +140,21 @@
     {% if session.get('user_id') %}
       <a href="{{ url_for('dashboard') }}">대시보드</a>
       <a href="{{ url_for('profile') }}">마이페이지</a>
-      {% if g.current_user and g.current_user.is_admin == 0 %}
+      {% if g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'business' %}
         <a href="{{ url_for('manage_products') }}">내 상품 관리</a>
       {% endif %}
       {% if g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'user' %}
-        <a href="{{ url_for('transfers') }}">송금</a>
+        <a href="{{ url_for('transfers') }}">사업자 송금</a>
       {% endif %}
       {% if g.current_user and g.current_user.is_admin == 0 %}
         <a href="{{ url_for('orders') }}">주문 내역</a>
       {% endif %}
-      {% if g.current_user and g.current_user.is_admin == 0 %}
-        <a href="{{ url_for('direct_chat_users') }}">1대1 채팅</a>
+      <a href="{{ url_for('direct_chat_users') }}">1대1 채팅</a>
+      {% if g.current_user and g.current_user.is_admin == 1 %}
+        <a href="{{ url_for('report') }}">신고 접수함</a>
+      {% elif g.current_user and g.current_user.account_type == 'user' %}
+        <a href="{{ url_for('report') }}">신고하기</a>
       {% endif %}
-      <a href="{{ url_for('report') }}">{% if g.current_user and g.current_user.is_admin == 1 %}신고 접수함{% else %}신고하기{% endif %}</a>
       {% if g.current_user and g.current_user.is_admin == 1 %}
         <a href="{{ url_for('admin_dashboard') }}">관리자 페이지</a>
       {% endif %}

@@ -176,13 +176,13 @@ def fetch_count(table_name):
         connection.close()
 
 
-def test_admin_account_has_no_chat_or_personal_product_management(
+def test_admin_account_has_direct_chat_but_no_global_or_product_management(
     moderation_database,
 ):
     client, csrf_token = authenticated_client(ADMIN_ID)
 
-    assert client.get('/chat').status_code == 403
-    assert client.get(f'/chat/{TARGET_ID}').status_code == 403
+    assert client.get('/chat').status_code == 200
+    assert client.get(f'/chat/{TARGET_ID}').status_code == 200
     assert client.get('/products/manage').status_code == 403
     assert client.get('/product/new').status_code == 403
     assert client.get(f'/product/{PRODUCT_ID}/edit').status_code == 403
@@ -200,6 +200,16 @@ def test_admin_account_has_no_chat_or_personal_product_management(
     ).status_code == 403
 
     admin_socket = connect_socket(client, ADMIN_ID)
+    assert admin_socket.is_connected()
+    global_result = admin_socket.emit(
+        'send_message',
+        {'message': '관리자 전체 채팅 시도'},
+        callback=True,
+    )
+    assert global_result == {
+        'ok': False,
+        'error': 'administrator_chat_disabled',
+    }
     assert not admin_socket.is_connected()
 
 
@@ -208,7 +218,11 @@ def test_admin_product_list_requires_reason_and_current_password(
 ):
     client, csrf_token = authenticated_client(ADMIN_ID)
     page = client.get('/admin').get_data(as_text=True)
-    assert '불량 상품 관리 삭제' in page
+    assert '상품 목록 및 관리' in page
+    assert 'class="admin-product-remove-toggle"' in page
+    assert 'aria-expanded="false"' in page
+    assert 'hidden' in page
+    assert '삭제 확인' in page
     assert 'name="reason"' in page
     assert 'name="current_password"' in page
 

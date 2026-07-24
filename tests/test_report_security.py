@@ -54,6 +54,10 @@ def client(tmp_path, monkeypatch):
             'INSERT INTO user (id, username, password) VALUES (?, ?, ?)',
             users,
         )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (OWNER_ID,),
+        )
         connection.executemany(
             '''
             INSERT INTO product (id, title, description, price, seller_id)
@@ -219,6 +223,57 @@ def test_valid_product_report_is_stored_with_product_reference(client):
     assert report['target_type'] == 'product'
     assert report['target_user_id'] is None
     assert report['target_product_id'] == TARGET_PRODUCT_ID
+
+
+def test_business_cannot_access_or_submit_reports(client):
+    login_as(client, OWNER_ID)
+    profile = client.get('/profile').get_data(as_text=True)
+    assert '신고하기' not in profile
+    assert client.get('/report').status_code == 403
+
+    token = get_csrf_token(client, '/profile')
+    response = client.post(
+        '/report',
+        data={
+            'csrf_token': token,
+            'target_type': 'product',
+            'target_id': TARGET_PRODUCT_ID,
+            'reason': VALID_REASON,
+        },
+    )
+    assert response.status_code == 403
+    assert fetch_rows('report') == []
+
+    connection = sqlite3.connect(market.DATABASE)
+    connection.execute('PRAGMA foreign_keys = ON')
+    try:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match='regular user reporter required',
+        ):
+            connection.execute(
+                '''
+                INSERT INTO report (
+                    id,
+                    reporter_id,
+                    target_type,
+                    target_user_id,
+                    target_product_id,
+                    reason,
+                    created_at
+                )
+                VALUES (?, ?, 'user', ?, NULL, ?, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    OWNER_ID,
+                    TARGET_USER_IDS[0],
+                    VALID_REASON,
+                    int(time.time()),
+                ),
+            )
+    finally:
+        connection.close()
 
 
 def test_report_audit_log_is_append_only(client):

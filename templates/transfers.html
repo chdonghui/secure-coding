@@ -1,14 +1,15 @@
 {% extends "base.html" %}
-{% block title %}송금{% endblock %}
+{% block title %}사업자 송금{% endblock %}
 {% block content %}
-<h2>송금</h2>
+<h2>사업자 송금</h2>
 <p>
-  이 화면의 잔액과 송금은 보안 실습을 위한 학습용 데이터입니다.
+  일반 사용자에서 사업자로 보내는 잔액과 송금은 보안 실습을 위한 학습용
+  데이터입니다.
   실제 현금이나 계좌 잔액이 이동하지 않습니다.
 </p>
 <p><strong>현재 학습용 잔액: {{ balance }}원</strong></p>
 
-<h3>사용자에게 송금</h3>
+<h3>사업자에게 송금</h3>
 {% if recipients %}
   <form method="post" action="{{ url_for('transfers') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -17,7 +18,7 @@
       name="request_id"
       value="{{ transfer_request_id }}"
     >
-    <label for="recipient_username">받는 사용자</label>
+    <label for="recipient_username">받는 사업자</label>
     <select id="recipient_username" name="recipient_username" required>
       <option value="">선택하세요</option>
       {% for recipient in recipients %}
@@ -49,10 +50,10 @@
     <button type="submit">송금하기</button>
   </form>
 {% else %}
-  <p>송금할 수 있는 다른 활성 사용자가 없습니다.</p>
+  <p>송금할 수 있는 활성 사업자가 없습니다.</p>
 {% endif %}
 
-<h3>송금 내역</h3>
+<h3>사업자 송금 내역</h3>
 <p>내역에는 돈의 이동 방향과 금액만 표시됩니다.</p>
 {% if transfer_history %}
   <ul>

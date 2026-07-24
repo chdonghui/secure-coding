@@ -62,6 +62,10 @@ def purchase_database(tmp_path, monkeypatch):
                     is_admin,
                 ),
             )
+        connection.execute(
+            "UPDATE user SET account_type = 'business' WHERE id = ?",
+            (SELLER_ID,),
+        )
         now = int(time.time())
         connection.executemany(
             '''
