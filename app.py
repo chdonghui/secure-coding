@@ -33,6 +33,8 @@ PRODUCT_MIN_PRICE = 0
 PRODUCT_MAX_PRICE = 1_000_000_000
 REPORT_REASON_MIN_LENGTH = 10
 REPORT_REASON_MAX_LENGTH = 1000
+MODERATION_REASON_MIN_LENGTH = 10
+MODERATION_REASON_MAX_LENGTH = 500
 MAX_REPORTS_PER_WINDOW = 5
 REPORT_RATE_WINDOW_SECONDS = 60 * 60
 MAX_REPORT_ATTEMPTS_PER_USER = 10
@@ -232,6 +234,17 @@ def add_user_security_columns(cursor):
                 )
             '''
         )
+    if 'is_admin' not in columns:
+        cursor.execute(
+            '''
+            ALTER TABLE user
+            ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0
+                CHECK(
+                    typeof(is_admin) = 'integer'
+                    AND is_admin IN (0, 1)
+                )
+            '''
+        )
 
 
 def migrate_plaintext_passwords(cursor):
@@ -284,6 +297,290 @@ def create_direct_message_table(cursor):
             FOREIGN KEY (sender_id) REFERENCES user(id) ON DELETE RESTRICT,
             FOREIGN KEY (recipient_id) REFERENCES user(id) ON DELETE RESTRICT
         )
+    """)
+
+
+def create_moderation_tables(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_moderation (
+            product_id TEXT PRIMARY KEY,
+            admin_id TEXT NOT NULL,
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH}
+                    AND {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (product_id) REFERENCES product(id) ON DELETE RESTRICT,
+            FOREIGN KEY (admin_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS user_dormancy (
+            user_id TEXT PRIMARY KEY,
+            admin_id TEXT NOT NULL,
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH}
+                    AND {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(user_id <> admin_id),
+            FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (admin_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS admin_action_audit (
+            id TEXT PRIMARY KEY,
+            admin_id TEXT NOT NULL,
+            action_type TEXT NOT NULL
+                CHECK(
+                    action_type IN (
+                        'product_removed',
+                        'user_dormant',
+                        'user_reactivated'
+                    )
+                ),
+            target_user_id TEXT,
+            target_product_id TEXT,
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH}
+                    AND {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(
+                (
+                    action_type = 'product_removed'
+                    AND target_product_id IS NOT NULL
+                    AND target_user_id IS NULL
+                )
+                OR
+                (
+                    action_type IN ('user_dormant', 'user_reactivated')
+                    AND target_user_id IS NOT NULL
+                    AND target_product_id IS NULL
+                )
+            ),
+            FOREIGN KEY (admin_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_user_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_product_id)
+                REFERENCES product(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def moderation_schema_is_current(cursor):
+    required_columns = {
+        'product_moderation': {
+            'product_id',
+            'admin_id',
+            'reason',
+            'created_at',
+        },
+        'user_dormancy': {
+            'user_id',
+            'admin_id',
+            'reason',
+            'created_at',
+        },
+        'admin_action_audit': {
+            'id',
+            'admin_id',
+            'action_type',
+            'target_user_id',
+            'target_product_id',
+            'reason',
+            'created_at',
+        },
+    }
+    required_foreign_keys = {
+        'product_moderation': {
+            ('product_id', 'product'),
+            ('admin_id', 'user'),
+        },
+        'user_dormancy': {
+            ('user_id', 'user'),
+            ('admin_id', 'user'),
+        },
+        'admin_action_audit': {
+            ('admin_id', 'user'),
+            ('target_user_id', 'user'),
+            ('target_product_id', 'product'),
+        },
+    }
+    for table_name, expected_columns in required_columns.items():
+        columns = {
+            row['name']
+            for row in cursor.execute(
+                f'PRAGMA table_info({table_name})'
+            ).fetchall()
+        }
+        foreign_keys = {
+            (row['from'], row['table'])
+            for row in cursor.execute(
+                f'PRAGMA foreign_key_list({table_name})'
+            ).fetchall()
+        }
+        schema_row = cursor.execute(
+            '''
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            ''',
+            (table_name,),
+        ).fetchone()
+        normalized_schema = ''.join(
+            (schema_row['sql'] if schema_row else '').split()
+        ).lower()
+        required_constraints = (
+            (
+                'check(length(trim(reason))between'
+                f'{MODERATION_REASON_MIN_LENGTH}and'
+                f'{MODERATION_REASON_MAX_LENGTH})'
+            )
+            in normalized_schema
+            and 'check(instr(reason,char(0))=0)' in normalized_schema
+            and (
+                "check(typeof(created_at)='integer'andcreated_at>=0)"
+                in normalized_schema
+            )
+        )
+        if (
+            not expected_columns <= columns
+            or not required_foreign_keys[table_name] <= foreign_keys
+            or not required_constraints
+        ):
+            return False
+        if (
+            table_name == 'user_dormancy'
+            and 'check(user_id<>admin_id)' not in normalized_schema
+        ):
+            return False
+        if table_name == 'admin_action_audit' and not all(
+            required_text in normalized_schema
+            for required_text in (
+                "'product_removed'",
+                "'user_dormant'",
+                "'user_reactivated'",
+                "action_type='product_removed'",
+                "action_typein('user_dormant','user_reactivated')",
+            )
+        ):
+            return False
+    return True
+
+
+def ensure_moderation_schema(cursor):
+    create_moderation_tables(cursor)
+    if not moderation_schema_is_current(cursor):
+        raise RuntimeError(
+            '기존 관리자 제재 스키마가 현재 보안 요구사항과 호환되지 않습니다.'
+        )
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_product_moderation_admin
+        BEFORE INSERT ON product_moderation
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.admin_id
+                AND user.is_admin = 1
+                AND user.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'administrator required');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_user_dormancy_admin
+        BEFORE INSERT ON user_dormancy
+        WHEN
+            NOT EXISTS (
+                SELECT 1
+                FROM user
+                WHERE
+                    user.id = NEW.admin_id
+                    AND user.is_admin = 1
+                    AND user.deleted_at IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM user_dormancy
+                        WHERE user_dormancy.user_id = user.id
+                    )
+            )
+            OR NOT EXISTS (
+                SELECT 1
+                FROM user
+                WHERE
+                    user.id = NEW.user_id
+                    AND user.is_admin = 0
+                    AND user.deleted_at IS NULL
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid dormancy action');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_admin_action_audit_admin
+        BEFORE INSERT ON admin_action_audit
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.admin_id
+                AND user.is_admin = 1
+                AND user.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'administrator required');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_product_moderation_update
+        BEFORE UPDATE ON product_moderation
+        BEGIN
+            SELECT RAISE(ABORT, 'product moderation is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_product_moderation_delete
+        BEFORE DELETE ON product_moderation
+        BEGIN
+            SELECT RAISE(ABORT, 'product moderation is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_admin_action_audit_update
+        BEFORE UPDATE ON admin_action_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'admin audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_admin_action_audit_delete
+        BEFORE DELETE ON admin_action_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'admin audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS admin_action_audit_created
+        ON admin_action_audit (created_at DESC, id DESC)
     """)
 
 
@@ -910,6 +1207,11 @@ def init_db():
                 failed_login_attempts INTEGER NOT NULL DEFAULT 0,
                 locked_until INTEGER,
                 session_version INTEGER NOT NULL DEFAULT 0,
+                is_admin INTEGER NOT NULL DEFAULT 0
+                    CHECK(
+                        typeof(is_admin) = 'integer'
+                        AND is_admin IN (0, 1)
+                    ),
                 deleted_at INTEGER
                     CHECK(
                         deleted_at IS NULL
@@ -925,6 +1227,7 @@ def init_db():
         add_user_security_columns(cursor)
         migrate_plaintext_passwords(cursor)
         migrate_product_schema(cursor)
+        ensure_moderation_schema(cursor)
         ensure_direct_message_schema(cursor)
         # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
         create_report_table(cursor)
@@ -1053,6 +1356,65 @@ def validate_report_reason(raw_reason):
     return reason, None
 
 
+def validate_moderation_reason(raw_reason):
+    reason = unicodedata.normalize(
+        'NFKC',
+        raw_reason.replace('\r\n', '\n').replace('\r', '\n').strip(),
+    )
+    if not (
+        MODERATION_REASON_MIN_LENGTH
+        <= len(reason)
+        <= MODERATION_REASON_MAX_LENGTH
+    ):
+        return None, (
+            f'관리 사유는 {MODERATION_REASON_MIN_LENGTH}~'
+            f'{MODERATION_REASON_MAX_LENGTH}자여야 합니다.'
+        )
+    if any(
+        unicodedata.category(character).startswith('C')
+        and character not in {'\n', '\t'}
+        for character in reason
+    ):
+        return None, '관리 사유에 허용되지 않는 문자가 포함되어 있습니다.'
+    if report_reason_contains_sensitive_data(reason):
+        return None, '관리 사유에 개인정보를 입력할 수 없습니다.'
+    return reason, None
+
+
+def add_admin_action_audit(
+    cursor,
+    action_type,
+    admin_id,
+    reason,
+    created_at,
+    target_user_id=None,
+    target_product_id=None,
+):
+    cursor.execute(
+        '''
+        INSERT INTO admin_action_audit (
+            id,
+            admin_id,
+            action_type,
+            target_user_id,
+            target_product_id,
+            reason,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            str(uuid.uuid4()),
+            admin_id,
+            action_type,
+            target_user_id,
+            target_product_id,
+            reason,
+            created_at,
+        ),
+    )
+
+
 def get_client_ip_hash():
     raw_address = request.remote_addr or 'unknown'
     try:
@@ -1163,7 +1525,18 @@ def validate_report_input(
     target_product_id = None
     if target_type == 'user':
         target_user = db.execute(
-            'SELECT id FROM user WHERE id = ? AND deleted_at IS NULL',
+            '''
+            SELECT id
+            FROM user
+            WHERE
+                id = ?
+                AND deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+            ''',
             (target_id,),
         ).fetchone()
         if target_user is None or target_user['id'] == reporter_id:
@@ -1175,7 +1548,19 @@ def validate_report_input(
             SELECT product.id, product.seller_id
             FROM product
             JOIN user AS seller ON seller.id = product.seller_id
-            WHERE product.id = ? AND seller.deleted_at IS NULL
+            WHERE
+                product.id = ?
+                AND seller.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = seller.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM product_moderation
+                    WHERE product_moderation.product_id = product.id
+                )
             ''',
             (target_id,),
         ).fetchone()
@@ -1268,7 +1653,18 @@ def load_and_validate_session():
 
     db = get_db()
     g.current_user = db.execute(
-        'SELECT * FROM user WHERE id = ? AND deleted_at IS NULL',
+        '''
+        SELECT *
+        FROM user
+        WHERE
+            id = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ''',
         (user_id,),
     ).fetchone()
     session_version = session.get('session_version', 0)
@@ -1295,6 +1691,18 @@ def login_required(view):
     return wrapped_view
 
 
+def admin_required(view):
+    @wraps(view)
+    def wrapped_view(*args, **kwargs):
+        if g.current_user is None:
+            return redirect(url_for('login'))
+        if g.current_user['is_admin'] != 1:
+            abort(403)
+        return view(*args, **kwargs)
+
+    return wrapped_view
+
+
 def get_product_or_404(product_id):
     try:
         normalized_product_id = str(uuid.UUID(product_id))
@@ -1308,7 +1716,19 @@ def get_product_or_404(product_id):
         SELECT product.*
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
-        WHERE product.id = ? AND seller.deleted_at IS NULL
+        WHERE
+            product.id = ?
+            AND seller.deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = seller.id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
         ''',
         (normalized_product_id,),
     ).fetchone()
@@ -1342,7 +1762,14 @@ def get_chat_recipient_or_404(recipient_id):
         '''
         SELECT id, username
         FROM user
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE
+            id = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
         ''',
         (normalized_recipient_id,),
     ).fetchone()
@@ -1418,7 +1845,18 @@ def login_post():
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
-        'SELECT * FROM user WHERE username = ? AND deleted_at IS NULL',
+        '''
+        SELECT *
+        FROM user
+        WHERE
+            username = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ''',
         (username,),
     )
     user = cursor.fetchone()
@@ -1487,7 +1925,18 @@ def products():
             seller.username AS seller_username
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
-        WHERE seller.deleted_at IS NULL
+        WHERE
+            seller.deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = seller.id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
         ORDER BY product.title, product.id
         '''
     ).fetchall()
@@ -1503,7 +1952,18 @@ def dashboard():
         SELECT product.*
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
-        WHERE seller.deleted_at IS NULL
+        WHERE
+            seller.deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = seller.id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
         ORDER BY product.title, product.id
         '''
     ).fetchall()
@@ -1709,7 +2169,13 @@ def manage_products():
         '''
         SELECT id, title, description, price, seller_id
         FROM product
-        WHERE seller_id = ?
+        WHERE
+            seller_id = ?
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
         ORDER BY title, id
         ''',
         (g.current_user['id'],),
@@ -1724,7 +2190,18 @@ def view_product(product_id):
     product = get_product_or_404(product_id)
     # 판매자 정보 조회
     seller = db.execute(
-        'SELECT id, username FROM user WHERE id = ? AND deleted_at IS NULL',
+        '''
+        SELECT id, username
+        FROM user
+        WHERE
+            id = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ''',
         (product['seller_id'],),
     ).fetchone()
     return render_template('view_product.html', product=product, seller=seller)
@@ -1805,6 +2282,304 @@ def delete_product(product_id):
     return redirect(url_for('manage_products'))
 
 
+@app.route('/admin/moderation')
+@admin_required
+def admin_moderation():
+    db = get_db()
+    products = db.execute(
+        '''
+        SELECT
+            product.id,
+            product.title,
+            product.description,
+            product.price,
+            product.seller_id,
+            seller.username AS seller_username,
+            EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = seller.id
+            ) AS seller_is_dormant,
+            (
+                SELECT COUNT(*)
+                FROM report
+                WHERE report.target_product_id = product.id
+            ) AS report_count
+        FROM product
+        JOIN user AS seller ON seller.id = product.seller_id
+        WHERE
+            seller.deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
+        ORDER BY report_count DESC, product.title, product.id
+        '''
+    ).fetchall()
+    users = db.execute(
+        '''
+        SELECT
+            user.id,
+            user.username,
+            user.is_admin,
+            user_dormancy.created_at AS dormant_at,
+            user_dormancy.reason AS dormant_reason,
+            (
+                SELECT COUNT(*)
+                FROM report
+                WHERE report.target_user_id = user.id
+            ) AS report_count
+        FROM user
+        LEFT JOIN user_dormancy ON user_dormancy.user_id = user.id
+        WHERE user.deleted_at IS NULL
+        ORDER BY report_count DESC, user.username, user.id
+        '''
+    ).fetchall()
+    audit_events = db.execute(
+        '''
+        SELECT
+            admin_action_audit.id,
+            admin_action_audit.action_type,
+            admin_action_audit.reason,
+            admin_action_audit.created_at,
+            administrator.username AS admin_username,
+            target_user.username AS target_username,
+            target_product.title AS target_product_title
+        FROM admin_action_audit
+        JOIN user AS administrator
+            ON administrator.id = admin_action_audit.admin_id
+        LEFT JOIN user AS target_user
+            ON target_user.id = admin_action_audit.target_user_id
+        LEFT JOIN product AS target_product
+            ON target_product.id = admin_action_audit.target_product_id
+        ORDER BY
+            admin_action_audit.created_at DESC,
+            admin_action_audit.id DESC
+        LIMIT 100
+        '''
+    ).fetchall()
+    return render_template(
+        'admin_moderation.html',
+        products=products,
+        users=users,
+        audit_events=audit_events,
+    )
+
+
+@app.route('/admin/products/<product_id>/remove', methods=['POST'])
+@admin_required
+@csrf_protected
+def admin_remove_product(product_id):
+    normalized_product_id = normalize_uuid_identifier(product_id)
+    if normalized_product_id is None:
+        abort(404)
+    reason, validation_error = validate_moderation_reason(
+        request.form.get('reason', '')
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('admin_moderation'))
+
+    db = get_db()
+    cursor = db.cursor()
+    product = cursor.execute(
+        '''
+        SELECT id
+        FROM product
+        WHERE
+            id = ?
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
+        ''',
+        (normalized_product_id,),
+    ).fetchone()
+    if product is None:
+        abort(404)
+
+    now = int(time.time())
+    try:
+        cursor.execute(
+            '''
+            INSERT INTO product_moderation (
+                product_id,
+                admin_id,
+                reason,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            ''',
+            (
+                product['id'],
+                g.current_user['id'],
+                reason,
+                now,
+            ),
+        )
+        add_admin_action_audit(
+            cursor,
+            'product_removed',
+            g.current_user['id'],
+            reason,
+            now,
+            target_product_id=product['id'],
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    flash('불량 상품이 관리 삭제되었습니다.')
+    return redirect(url_for('admin_moderation'))
+
+
+@app.route('/admin/users/<user_id>/dormant', methods=['POST'])
+@admin_required
+@csrf_protected
+def admin_dormant_user(user_id):
+    normalized_user_id = normalize_uuid_identifier(user_id)
+    if normalized_user_id is None:
+        abort(404)
+    reason, validation_error = validate_moderation_reason(
+        request.form.get('reason', '')
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('admin_moderation'))
+
+    db = get_db()
+    cursor = db.cursor()
+    target_user = cursor.execute(
+        '''
+        SELECT id, is_admin
+        FROM user
+        WHERE id = ? AND deleted_at IS NULL
+        ''',
+        (normalized_user_id,),
+    ).fetchone()
+    if target_user is None:
+        abort(404)
+    if (
+        target_user['id'] == g.current_user['id']
+        or target_user['is_admin'] == 1
+    ):
+        abort(403)
+
+    now = int(time.time())
+    try:
+        update_cursor = cursor.execute(
+            '''
+            UPDATE user
+            SET session_version = session_version + 1
+            WHERE
+                id = ?
+                AND is_admin = 0
+                AND deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+            ''',
+            (target_user['id'],),
+        )
+        if update_cursor.rowcount != 1:
+            db.rollback()
+            abort(404)
+        cursor.execute(
+            '''
+            INSERT INTO user_dormancy (
+                user_id,
+                admin_id,
+                reason,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            ''',
+            (
+                target_user['id'],
+                g.current_user['id'],
+                reason,
+                now,
+            ),
+        )
+        add_admin_action_audit(
+            cursor,
+            'user_dormant',
+            g.current_user['id'],
+            reason,
+            now,
+            target_user_id=target_user['id'],
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    disconnect_user_sockets(target_user['id'])
+    flash('불량 사용자를 휴면 처리했습니다.')
+    return redirect(url_for('admin_moderation'))
+
+
+@app.route('/admin/users/<user_id>/reactivate', methods=['POST'])
+@admin_required
+@csrf_protected
+def admin_reactivate_user(user_id):
+    normalized_user_id = normalize_uuid_identifier(user_id)
+    if normalized_user_id is None:
+        abort(404)
+    reason, validation_error = validate_moderation_reason(
+        request.form.get('reason', '')
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('admin_moderation'))
+
+    db = get_db()
+    cursor = db.cursor()
+    target_user = cursor.execute(
+        '''
+        SELECT user.id, user.is_admin
+        FROM user
+        JOIN user_dormancy ON user_dormancy.user_id = user.id
+        WHERE user.id = ? AND user.deleted_at IS NULL
+        ''',
+        (normalized_user_id,),
+    ).fetchone()
+    if target_user is None:
+        abort(404)
+    if target_user['is_admin'] == 1:
+        abort(403)
+
+    now = int(time.time())
+    try:
+        delete_cursor = cursor.execute(
+            'DELETE FROM user_dormancy WHERE user_id = ?',
+            (target_user['id'],),
+        )
+        if delete_cursor.rowcount != 1:
+            db.rollback()
+            abort(404)
+        add_admin_action_audit(
+            cursor,
+            'user_reactivated',
+            g.current_user['id'],
+            reason,
+            now,
+            target_user_id=target_user['id'],
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    flash('사용자 휴면을 해제했습니다.')
+    return redirect(url_for('admin_moderation'))
+
+
 # 1대1 채팅 사용자 목록
 @app.route('/chat')
 @login_required
@@ -1813,7 +2588,14 @@ def direct_chat_users():
         '''
         SELECT id, username
         FROM user
-        WHERE id <> ? AND deleted_at IS NULL
+        WHERE
+            id <> ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
         ORDER BY username, id
         LIMIT ?
         ''',
@@ -2063,7 +2845,14 @@ def get_authenticated_socket_user():
         '''
         SELECT id, username, session_version
         FROM user
-        WHERE id = ? AND deleted_at IS NULL
+        WHERE
+            id = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
         ''',
         (user_id,),
     ).fetchone()
@@ -2301,7 +3090,18 @@ def handle_send_direct_message_event(data):
 
     db = get_db()
     recipient = db.execute(
-        'SELECT id FROM user WHERE id = ? AND deleted_at IS NULL',
+        '''
+        SELECT id
+        FROM user
+        WHERE
+            id = ?
+            AND deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = user.id
+            )
+        ''',
         (recipient_id,),
     ).fetchone()
     if recipient is None:
