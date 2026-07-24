@@ -1,8 +1,12 @@
 {% extends "base.html" %}
-{% block title %}프로필{% endblock %}
+{% block title %}마이페이지{% endblock %}
 {% block content %}
-<h2>프로필 관리</h2>
+<h2>마이페이지</h2>
+<h3>내 정보</h3>
 <p>사용자명: {{ user.username }}</p>
+<p>소개글: {{ user.bio or '등록된 소개글이 없습니다.' }}</p>
+
+<h3>소개글 변경</h3>
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   소개글: <br>
@@ -16,5 +20,37 @@
     required
   ><br>
   <button type="submit">프로필 업데이트</button>
+</form>
+
+<h3>비밀번호 변경</h3>
+<form method="post" action="{{ url_for('update_password') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  현재 비밀번호:
+  <input
+    type="password"
+    name="current_password"
+    maxlength="128"
+    autocomplete="current-password"
+    required
+  ><br>
+  새 비밀번호:
+  <input
+    type="password"
+    name="new_password"
+    minlength="12"
+    maxlength="128"
+    autocomplete="new-password"
+    required
+  ><br>
+  새 비밀번호 확인:
+  <input
+    type="password"
+    name="confirm_password"
+    minlength="12"
+    maxlength="128"
+    autocomplete="new-password"
+    required
+  ><br>
+  <button type="submit">비밀번호 변경</button>
 </form>
 {% endblock %}

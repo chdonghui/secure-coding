@@ -16,6 +16,7 @@ import app as market
 
 VALID_USERNAME = 'security_user'
 VALID_PASSWORD = 'StrongPassword123!'
+NEW_PASSWORD = 'NewStrongPassword456!'
 
 
 @pytest.fixture
@@ -29,8 +30,7 @@ def client(tmp_path, monkeypatch):
         TESTING=True,
     )
     market.init_db()
-    with market.app.test_client() as test_client:
-        yield test_client
+    yield market.app.test_client()
 
 
 def get_csrf_token(client, path):
@@ -147,7 +147,33 @@ def test_membership_state_changes_require_csrf(client):
         data={'bio': 'new bio', 'current_password': VALID_PASSWORD},
     )
     assert response.status_code == 400
+    response = client.post(
+        '/profile/password',
+        data={
+            'current_password': VALID_PASSWORD,
+            'new_password': NEW_PASSWORD,
+            'confirm_password': NEW_PASSWORD,
+        },
+    )
+    assert response.status_code == 400
     assert client.post('/logout').status_code == 400
+
+
+def test_mypage_requires_login_and_only_shows_current_user(client):
+    response = client.get('/profile')
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/login')
+
+    register_user(client)
+    register_user(client, 'another_user', VALID_PASSWORD)
+    login_user(client)
+    response = client.get('/profile')
+    page = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert VALID_USERNAME in page
+    assert 'another_user' not in page
+    assert fetch_user()['password'] not in page
 
 
 def test_profile_requires_password_and_escapes_xss(client):
@@ -198,6 +224,116 @@ def test_profile_rejects_oversized_bio(client):
     )
     assert response.status_code == 302
     assert fetch_user()['bio'] is None
+
+
+def change_password(
+    client,
+    current_password=VALID_PASSWORD,
+    new_password=NEW_PASSWORD,
+    confirm_password=NEW_PASSWORD,
+):
+    token = get_csrf_token(client, '/profile')
+    return client.post(
+        '/profile/password',
+        data={
+            'csrf_token': token,
+            'current_password': current_password,
+            'new_password': new_password,
+            'confirm_password': confirm_password,
+        },
+    )
+
+
+def test_password_change_rehashes_and_invalidates_existing_sessions(client):
+    register_user(client)
+    login_user(client)
+    original_user = fetch_user()
+    original_hash = original_user['password']
+    original_session_version = original_user['session_version']
+
+    second_client = market.app.test_client()
+    assert login_user(second_client).status_code == 302
+    socket_csrf_token = get_csrf_token(second_client, '/profile')
+    second_socket = market.socketio.test_client(
+        market.app,
+        flask_test_client=second_client,
+        auth={'csrf_token': socket_csrf_token},
+    )
+    assert second_socket.is_connected()
+
+    response = change_password(client)
+    changed_user = fetch_user()
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/login')
+    assert changed_user['password'] != original_hash
+    assert changed_user['password'].startswith('$argon2')
+    assert market.password_hasher.verify(
+        changed_user['password'],
+        NEW_PASSWORD,
+    )
+    assert changed_user['session_version'] == original_session_version + 1
+
+    with client.session_transaction() as current_session:
+        assert 'user_id' not in current_session
+    invalidated_response = second_client.get('/dashboard')
+    assert invalidated_response.status_code == 302
+    assert invalidated_response.headers['Location'].endswith('/login')
+    socket_response = second_socket.emit(
+        'send_message',
+        {'message': '무효화되어야 하는 기존 세션'},
+        callback=True,
+    )
+    assert socket_response == {
+        'ok': False,
+        'error': 'authentication_required',
+    }
+    assert not second_socket.is_connected()
+
+    assert login_user(client).headers['Location'].endswith('/login')
+    assert login_user(
+        client,
+        password=NEW_PASSWORD,
+    ).headers['Location'].endswith('/dashboard')
+
+
+@pytest.mark.parametrize(
+    ('current_password', 'new_password', 'confirm_password'),
+    [
+        ('WrongPassword123!', NEW_PASSWORD, NEW_PASSWORD),
+        (VALID_PASSWORD, 'short1', 'short1'),
+        (VALID_PASSWORD, '123456789012', '123456789012'),
+        (VALID_PASSWORD, 'abcdefghijkl', 'abcdefghijkl'),
+        (VALID_PASSWORD, 'Invalid Password123', 'Invalid Password123'),
+        (VALID_PASSWORD, NEW_PASSWORD, 'DifferentPassword789!'),
+        (VALID_PASSWORD, VALID_PASSWORD, VALID_PASSWORD),
+    ],
+)
+def test_password_change_rejects_invalid_input_without_modifying_hash(
+    client,
+    current_password,
+    new_password,
+    confirm_password,
+):
+    register_user(client)
+    login_user(client)
+    original_user = fetch_user()
+
+    response = change_password(
+        client,
+        current_password,
+        new_password,
+        confirm_password,
+    )
+    unchanged_user = fetch_user()
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/profile')
+    assert unchanged_user['password'] == original_user['password']
+    assert (
+        unchanged_user['session_version']
+        == original_user['session_version']
+    )
+    with client.session_transaction() as current_session:
+        assert current_session['user_id'] == original_user['id']
 
 
 def test_login_sets_protected_session_cookie(client):
@@ -306,8 +442,13 @@ def test_legacy_database_passwords_and_columns_are_migrated(tmp_path, monkeypatc
     finally:
         connection.close()
 
-    assert {'failed_login_attempts', 'locked_until'} <= columns
+    assert {
+        'failed_login_attempts',
+        'locked_until',
+        'session_version',
+    } <= columns
     assert migrated_user['password'].startswith('$argon2')
+    assert migrated_user['session_version'] == 0
     assert market.password_hasher.verify(
         migrated_user['password'],
         VALID_PASSWORD,

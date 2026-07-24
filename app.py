@@ -208,6 +208,13 @@ def add_user_security_columns(cursor):
         )
     if 'locked_until' not in columns:
         cursor.execute('ALTER TABLE user ADD COLUMN locked_until INTEGER')
+    if 'session_version' not in columns:
+        cursor.execute(
+            '''
+            ALTER TABLE user
+            ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0
+            '''
+        )
 
 
 def migrate_plaintext_passwords(cursor):
@@ -1146,7 +1153,12 @@ def load_and_validate_session():
         'SELECT * FROM user WHERE id = ?',
         (user_id,),
     ).fetchone()
-    if g.current_user is None:
+    session_version = session.get('session_version', 0)
+    if (
+        g.current_user is None
+        or not isinstance(session_version, int)
+        or session_version != g.current_user['session_version']
+    ):
         session.clear()
         flash('로그인 정보가 유효하지 않습니다. 다시 로그인해주세요.')
         return redirect(url_for('login'))
@@ -1291,6 +1303,7 @@ def login_post():
     session.clear()
     session.permanent = True
     session['user_id'] = user['id']
+    session['session_version'] = user['session_version']
     session['authenticated_at'] = now
     session['last_activity'] = now
     flash('로그인 성공!')
@@ -1316,7 +1329,7 @@ def dashboard():
     all_products = cursor.fetchall()
     return render_template('dashboard.html', products=all_products, user=g.current_user)
 
-# 프로필 페이지: bio 업데이트 가능
+# 마이페이지: 로그인한 사용자의 계정 정보 조회와 소개글 업데이트
 @app.route('/profile', methods=['GET', 'POST'])
 @login_required
 def profile():
@@ -1348,6 +1361,62 @@ def profile_post():
     db.commit()
     flash('프로필이 업데이트되었습니다.')
     return redirect(url_for('profile'))
+
+
+@app.route('/profile/password', methods=['POST'])
+@login_required
+@csrf_protected
+def update_password():
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+
+    if (
+        len(current_password) > PASSWORD_MAX_LENGTH
+        or not verify_password(g.current_user['password'], current_password)
+    ):
+        flash('현재 비밀번호가 올바르지 않습니다.')
+        return redirect(url_for('profile'))
+
+    validation_error = validate_password(new_password)
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('profile'))
+    if not hmac.compare_digest(new_password, confirm_password):
+        flash('새 비밀번호 확인이 일치하지 않습니다.')
+        return redirect(url_for('profile'))
+    if verify_password(g.current_user['password'], new_password):
+        flash('현재 비밀번호와 다른 새 비밀번호를 사용해주세요.')
+        return redirect(url_for('profile'))
+
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        '''
+        UPDATE user
+        SET
+            password = ?,
+            session_version = session_version + 1,
+            failed_login_attempts = 0,
+            locked_until = NULL
+        WHERE id = ? AND session_version = ?
+        ''',
+        (
+            password_hasher.hash(new_password),
+            g.current_user['id'],
+            g.current_user['session_version'],
+        ),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        session.clear()
+        abort(403)
+    db.commit()
+
+    session.clear()
+    flash('비밀번호가 변경되었습니다. 새 비밀번호로 다시 로그인해주세요.')
+    return redirect(url_for('login'))
+
 
 # 상품 등록
 @app.route('/product/new', methods=['GET', 'POST'])
@@ -1669,10 +1738,15 @@ def get_authenticated_socket_user():
         return None
 
     user = get_db().execute(
-        'SELECT id, username FROM user WHERE id = ?',
+        'SELECT id, username, session_version FROM user WHERE id = ?',
         (user_id,),
     ).fetchone()
-    if user is None:
+    session_version = session.get('session_version', 0)
+    if (
+        user is None
+        or not isinstance(session_version, int)
+        or session_version != user['session_version']
+    ):
         session.clear()
         return None
 
