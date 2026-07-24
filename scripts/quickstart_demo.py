@@ -13,8 +13,8 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ADMIN_USERNAME = 'quick_admin'
-USER_USERNAME = 'quick_user'
-RECIPIENT_USERNAME = 'quick_receiver'
+USER_USERNAME = 'user1'
+RECIPIENT_USERNAME = 'user2'
 DEMO_WALLET_BALANCE = 100_000
 
 
@@ -263,11 +263,11 @@ def main():
             f'{accounts["admin_password"]}'
         )
         print(
-            f'일반 사용자 계정: {accounts["user_username"]} / '
+            f'일반 사용자 1 계정: {accounts["user_username"]} / '
             f'{accounts["user_password"]}'
         )
         print(
-            f'송금 수신 계정: {accounts["recipient_username"]} / '
+            f'일반 사용자 2 계정: {accounts["recipient_username"]} / '
             f'{accounts["recipient_password"]}'
         )
         print(
@@ -277,8 +277,8 @@ def main():
         print(f'접속 주소: http://127.0.0.1:{arguments.port}')
         print(f'송금 페이지: http://127.0.0.1:{arguments.port}/transfers')
         print(
-            '간단 송금 테스트: quick_user로 로그인 → 송금 → '
-            'quick_receiver 선택'
+            '간단 송금 테스트: user1로 로그인 → 송금 → user2 선택 '
+            '(반대 방향도 가능)'
         )
         print(
             f'관리자 페이지: '

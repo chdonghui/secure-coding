@@ -19,9 +19,11 @@ import app as market
 SENDER_ID = '00000000-0000-0000-0000-000000000701'
 RECIPIENT_ID = '00000000-0000-0000-0000-000000000702'
 OUTSIDER_ID = '00000000-0000-0000-0000-000000000703'
+ADMIN_ID = '00000000-0000-0000-0000-000000000704'
 SENDER_USERNAME = 'transfer_sender'
 RECIPIENT_USERNAME = 'transfer_recipient'
 OUTSIDER_USERNAME = 'transfer_outsider'
+ADMIN_USERNAME = 'transfer_admin'
 SENDER_PASSWORD = 'TransferSender123!'
 RECIPIENT_PASSWORD = 'TransferRecipient123!'
 INITIAL_SENDER_BALANCE = 100_000
@@ -59,6 +61,11 @@ def transfer_database(tmp_path, monkeypatch):
                 OUTSIDER_USERNAME,
                 'TransferOutsider123!',
             ),
+            (
+                ADMIN_ID,
+                ADMIN_USERNAME,
+                'TransferAdmin123!',
+            ),
         )
         for user_id, username, password in users:
             connection.execute(
@@ -72,6 +79,10 @@ def transfer_database(tmp_path, monkeypatch):
                     market.password_hasher.hash(password),
                 ),
             )
+        connection.execute(
+            'UPDATE user SET is_admin = 1 WHERE id = ?',
+            (ADMIN_ID,),
+        )
         now = int(time.time())
         for user_id, amount in (
             (SENDER_ID, INITIAL_SENDER_BALANCE),
@@ -178,6 +189,12 @@ def test_transfer_page_requires_login_and_lists_only_active_counterparties(
     assert f'value="{SENDER_USERNAME}"' not in page
     assert SENDER_PASSWORD not in page
 
+    admin, _ = authenticated_client(ADMIN_ID)
+    assert admin.get('/transfers').status_code == 403
+    assert 'href="/transfers"' not in admin.get('/products').get_data(
+        as_text=True
+    )
+
 
 def test_newly_registered_user_gets_an_empty_wallet(transfer_database):
     client = market.app.test_client()
@@ -211,7 +228,7 @@ def test_newly_registered_user_gets_an_empty_wallet(transfer_database):
         connection.close()
 
 
-def test_transfer_is_atomic_and_history_is_private_and_escaped(
+def test_transfer_is_atomic_and_history_is_private_and_minimal(
     transfer_database,
 ):
     sender, sender_token = authenticated_client()
@@ -230,18 +247,37 @@ def test_transfer_is_atomic_and_history_is_private_and_escaped(
 
     sender_page = sender.get('/transfers').get_data(as_text=True)
     assert memo not in sender_page
-    assert '&lt;script&gt;alert' in sender_page
-    assert '받는 사용자: transfer_recipient' in sender_page
+    assert '&lt;script&gt;alert' not in sender_page
+    assert '금액: 12500원' in sender_page
+    assert '받는 사용자: transfer_recipient' not in sender_page
 
     recipient, _ = authenticated_client(RECIPIENT_ID)
     recipient_page = recipient.get('/transfers').get_data(as_text=True)
-    assert '보낸 사용자: transfer_sender' in recipient_page
     assert '금액: 12500원' in recipient_page
+    assert '보낸 사용자: transfer_sender' not in recipient_page
 
     outsider, _ = authenticated_client(OUTSIDER_ID)
     outsider_page = outsider.get('/transfers').get_data(as_text=True)
     assert '금액: 12500원' not in outsider_page
     assert memo not in outsider_page
+
+
+def test_regular_users_can_transfer_in_both_directions(transfer_database):
+    sender, sender_token = authenticated_client(SENDER_ID)
+    send_transfer(sender, sender_token, amount='10000')
+
+    recipient, recipient_token = authenticated_client(RECIPIENT_ID)
+    send_transfer(
+        recipient,
+        recipient_token,
+        recipient_username=SENDER_USERNAME,
+        amount='3000',
+        current_password=RECIPIENT_PASSWORD,
+    )
+
+    assert fetch_balance(SENDER_ID) == 93_000
+    assert fetch_balance(RECIPIENT_ID) == 8_000
+    assert fetch_transfer_count() == 2
 
 
 def test_transfer_requires_csrf_and_current_password(transfer_database):

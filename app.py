@@ -3158,6 +3158,8 @@ def dashboard():
 @app.route('/transfers', methods=['GET', 'POST'])
 @login_required
 def transfers():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     if request.method == 'POST':
         return create_transfer()
 
@@ -3228,6 +3230,8 @@ def transfers():
 
 @csrf_protected
 def create_transfer():
+    if g.current_user['is_admin'] == 1:
+        abort(403)
     request_id = normalize_uuid_identifier(
         request.form.get('request_id', '')
     )

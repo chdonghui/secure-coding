@@ -36,15 +36,6 @@
       required
     >
     <br>
-    <label for="transfer_memo">메모</label>
-    <input
-      id="transfer_memo"
-      type="text"
-      name="memo"
-      maxlength="{{ transfer_memo_max_length }}"
-      autocomplete="off"
-    >
-    <br>
     <label for="transfer_password">현재 비밀번호</label>
     <input
       id="transfer_password"
@@ -62,22 +53,17 @@
 {% endif %}
 
 <h3>송금 내역</h3>
+<p>내역에는 돈의 이동 방향과 금액만 표시됩니다.</p>
 {% if transfer_history %}
   <ul>
     {% for transfer in transfer_history %}
       <li>
         {% if transfer.sender_id == user_id %}
           <strong>보냄</strong>
-          <p>받는 사용자: {{ transfer.recipient_username_snapshot }}</p>
         {% else %}
           <strong>받음</strong>
-          <p>보낸 사용자: {{ transfer.sender_username_snapshot }}</p>
         {% endif %}
         <p>금액: {{ transfer.amount }}원</p>
-        {% if transfer.memo %}
-          <p>메모: {{ transfer.memo }}</p>
-        {% endif %}
-        <p>처리 시각: {{ transfer.created_at }}</p>
       </li>
     {% endfor %}
   </ul>
