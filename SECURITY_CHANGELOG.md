@@ -8,6 +8,7 @@
 | 문서 | 역할 |
 |---|---|
 | `README.md` | 현재 버전과 설치·실행 방법 |
+| `FEATURE_CHANGELOG.md` | 버전별로 추가·변경·제거한 기능 설명 |
 | `SECURITY_CHANGELOG.md` | 버전별로 적용한 보안 조치와 테스트 이력 |
 | `SECURITY_REVIEW.md` | 현재 코드 기준 전체 보안 체크리스트와 남은 작업 |
 | `VERSIONING.md` | 버전 결정과 필수 커밋 절차 |
@@ -16,6 +17,7 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `2.0` | `2026-07-24` | 1대1 채팅 권한 격리, 메시지 무결성 및 비공개 전달 | 자동 테스트 145개 통과 |
 | `1.7` | `2026-07-24` | 본인 등록 상품 관리와 판매자별 조회 격리 | 자동 테스트 119개 통과 |
 | `1.6` | `2026-07-24` | 본인 마이페이지 조회·소개글·비밀번호 변경과 세션 무효화 | 자동 테스트 117개 통과 |
 | `1.5` | `2026-07-24` | Socket 인증·메시지 검증·채팅 남용 및 연결 보호 | 자동 테스트 108개 통과 |
@@ -31,6 +33,152 @@
 - ⚠️: 일부 방어만 존재하거나 후속 개선 필요
 - ❌: 해당 버전에서 미적용
 - N/A: 해당 버전에 기능이 없음
+
+---
+
+## Version 2.0
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `2.0` |
+| Date | `2026-07-24` |
+| 변경 유형 | Major Version |
+| 적용 범위 | 사용자 선택, 1대1 실시간 메시지, 대화 기록과 메시지 DB 스키마 |
+| 테스트 | 기존 보안 테스트, `tests/test_direct_chat_security.py` |
+| 테스트 결과 | `145 passed` |
+
+### 조치 전후 요약
+
+| 항목 | Version 1.7 | Version 2.0 |
+|---|---|---|
+| 채팅 유형 | 전체 사용자 브로드캐스트 | 전체 채팅 유지와 별도 1대1 채팅 추가 |
+| 대화 상대 선택 | ❌ 없음 | ✅ 본인을 제외한 사용자명 목록 |
+| 메시지 전달 범위 | 전체 연결 사용자 | ✅ 서버가 배정한 발신자·수신자 개인 방 |
+| 발신자 결정 | ✅ 전체 채팅에서 서버 생성 | ✅ 1대1 채팅도 세션과 DB에서 서버 생성 |
+| 기록 저장 | ❌ 전체 채팅은 미저장 | ✅ 1대1 메시지를 SQLite에 저장 |
+| 기록 열람 권한 | ❌ 기록 없음 | ✅ 현재 사용자와 상대방의 대화만 최대 100건 조회 |
+| 메시지 검증 | ✅ 전체 채팅 1~500자 검증 | ✅ 1대1 채팅에도 동일 검증과 필드 허용 목록 적용 |
+| 남용 방지 | ✅ 전체 채팅 사용자·IP 제한 | ✅ 전체·1대1 채팅이 같은 제한을 공유 |
+| DB 무결성 | ❌ 메시지 테이블 없음 | ✅ 외래키·자기 전송 금지·길이·시각 제약과 조회 인덱스 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드 근거 |
+|---|---|---|---|
+| `V2.0-DM-AUTH-01` | HTTP 인증 | 사용자 목록과 대화 화면을 로그인 사용자에게만 제공 | `direct_chat_users`, `direct_chat`, `login_required` |
+| `V2.0-DM-PRIVACY-01` | 정보 최소화 | 사용자 목록에 본인을 제외한 ID와 사용자명만 표시 | `direct_chat_users`, 목록 테스트 |
+| `V2.0-DM-TARGET-01` | 상대 검증 | UUID 형식·존재 여부를 확인하고 자기 자신과의 대화를 거부 | `get_chat_recipient_or_404` |
+| `V2.0-DM-ROOM-01` | 서버 방 배정 | Socket 인증 성공 시 서버가 사용자 ID 기반 개인 방에 연결 | `handle_socket_connect`, `direct_chat_room` |
+| `V2.0-DM-INPUT-01` | 이벤트 허용 목록 | `recipient_id`, `message`만 허용해 발신자·방 위조 필드를 거부 | `validate_direct_chat_message` |
+| `V2.0-DM-SENDER-01` | 발신자 무결성 | 발신자 ID·사용자명을 인증 세션과 DB에서 생성 | `handle_send_direct_message_event` |
+| `V2.0-DM-DELIVERY-01` | 비공개 전달 | 발신자와 수신자의 개인 Socket 방에만 메시지 전달 | `handle_send_direct_message_event` |
+| `V2.0-DM-HISTORY-01` | 기록 권한 | 양쪽 당사자가 현재 사용자와 상대인 행만 최근 100건 조회 | `direct_chat` |
+| `V2.0-DM-XSS-01` | 출력 인코딩 | 기존 기록은 Jinja 이스케이프, 실시간 메시지는 DOM `textContent` 사용 | `templates/direct_chat.html` |
+| `V2.0-DM-RATE-01` | 전송 제한 | 전체·1대1 채팅에 동일한 사용자·IP 제한 적용 | `consume_chat_rate_limit` |
+| `V2.0-DM-SPAM-01` | 반복 제한 | 같은 상대에게 동일 메시지를 5초 안에 반복 전송하지 못하게 제한 | `chat_message_is_duplicate` |
+| `V2.0-DM-DATA-01` | 참조 무결성 | 발신자·수신자 외래키와 자기 전송 금지 제약 적용 | `create_direct_message_table` |
+| `V2.0-DM-DATA-02` | 내용 무결성 | 1~500자, NUL 차단, 정수 생성 시각 제약 적용 | `create_direct_message_table` |
+| `V2.0-DM-DATA-03` | 조회 인덱스 | 양방향 대화 기록 조회용 복합 인덱스 두 개 적용 | `ensure_direct_message_schema` |
+| `V2.0-DM-ERROR-01` | 안전한 실패 | DB 저장 실패 시 롤백하고 내부정보 없는 Socket 오류 반환 | `handle_send_direct_message_event` |
+
+개인 Socket 방 이름은 서버 내부에서만 생성합니다. 클라이언트가 전송 이벤트에
+`sender_id`, `username` 또는 `room`을 추가하면 전체 요청을 거부합니다. 전송 전과
+기록 조회 시 모두 실제 사용자와 대화 당사자 관계를 다시 확인합니다.
+
+### 데이터베이스 변경과 마이그레이션
+
+새 핵심 업무 테이블인 `direct_message`를 추가했습니다.
+
+| 필드 | 타입·제약 | 용도 |
+|---|---|---|
+| `id` | `TEXT PRIMARY KEY` | 서버 생성 메시지 UUID |
+| `sender_id` | `TEXT NOT NULL`, `user(id)` 외래키 | 발신자 |
+| `recipient_id` | `TEXT NOT NULL`, `user(id)` 외래키 | 수신자 |
+| `message` | `TEXT NOT NULL`, 1~500자·NUL 차단 | 일반 텍스트 메시지 |
+| `created_at` | 0 이상 `INTEGER` | 서버 생성 Unix 시각 |
+
+테이블에는 `sender_id <> recipient_id` 제약을 적용했습니다. 양방향 기록 조회를
+위해 다음 인덱스를 함께 생성합니다.
+
+- `direct_message_sender_recipient_created`
+- `direct_message_recipient_sender_created`
+
+마이그레이션 동작:
+
+1. 기존 사용자 보안 컬럼과 상품 스키마를 먼저 확인합니다.
+2. `direct_message` 테이블이 없으면 현재 제약을 포함해 새로 생성합니다.
+3. 기존에 같은 이름의 비호환 테이블이 있으면 임의 변환하지 않고 초기화를
+   중단합니다.
+4. 현재 스키마가 확인된 경우에만 양방향 조회 인덱스를 생성합니다.
+
+Version 1.7까지 메시지 테이블이 없었으므로 이동할 기존 1대1 메시지 데이터는
+없습니다. 기존 전체 채팅 메시지는 계속 저장하지 않습니다.
+
+### 템플릿·의존성·환경변수 변경
+
+- `templates/base.html`: 로그인 메뉴에 1대1 채팅 링크와 기록 영역 스타일 추가
+- `templates/direct_chat_users.html`
+  - 본인을 제외한 대화 상대 사용자명 목록
+  - 다른 계정 필드 미노출과 빈 목록 안내
+- `templates/direct_chat.html`
+  - 최근 대화 기록과 실시간 입력 화면
+  - CSRF Token을 사용한 Socket 연결
+  - 현재 대화 메시지만 DOM에 추가하는 참여자 ID 검사
+  - 발신자명과 메시지를 `textContent`로 출력
+- `tests/test_direct_chat_security.py`: 1대1 채팅 기능·보안·DB 테스트 26개
+
+새 의존성과 환경변수는 없습니다.
+
+### 검증 결과
+
+실행 명령:
+
+```sh
+conda activate secure_coding
+python -m pytest -q
+```
+
+결과:
+
+```text
+145 passed
+```
+
+검증한 주요 시나리오:
+
+- 비로그인 사용자 목록·대화 화면 접근 차단
+- 사용자 목록에서 본인과 비공개 계정 필드 미노출
+- 잘못된·미존재·자기 자신 상대의 일반 404 처리
+- 대화 당사자가 아닌 메시지의 기록 미노출
+- 최근 기록 100건 제한과 시간순 표시
+- 발신자·수신자만 실시간 메시지 수신
+- 발신자 ID·사용자명 서버 생성과 메시지 영구 저장
+- 추가 필드를 이용한 발신자·방 위조 차단
+- 미존재 수신자와 자기 전송 차단
+- 기존·실시간 메시지의 저장형·DOM XSS 방어
+- 전체 채팅에서 1대1 채팅으로 전환하는 속도 제한 우회 차단
+- 동일 상대·동일 메시지 반복 차단
+- 이벤트 처리 시 만료 세션 재검사와 연결 종료
+- 메시지 외래키·자기 전송·길이·NUL·시각 DB 제약
+- 비호환 기존 메시지 테이블 발견 시 안전한 초기화 중단
+- Version 1.1~1.7 전체 보안 회귀 없음
+
+### Version 2.0 이후 남은 보안 항목
+
+- 1대1 메시지 보존 기간, 사용자 삭제 요청 및 운영자 보존 정책
+- 사용자 차단, 읽음 확인, 안 읽은 메시지 개수와 기록 페이지네이션
+- 관리자 권한 체계가 추가될 경우 대화 열람 정책과 감사 로그
+- 다중 서버용 공용 Socket 방·채팅 Rate Limiting 저장소
+- 실제 운영 TLS 인증서, HTTPS/WSS 프록시와 Secure 쿠키 배포 검증
+- 비밀번호 변경·재인증 실패 속도 제한과 분실 복구
+- 관리자 상품·신고 처리 흐름과 역할 기반 접근 제어
+- Content-Security-Policy 등 HTTP 보안 헤더
+- Python 전체 의존성 버전 고정과 정기 취약점 검사
+- 기존 Git 이력에 포함됐던 민감 DB 데이터 처리
+
+전체 현재 상태는 `SECURITY_REVIEW.md`에서 관리합니다.
 
 ---
 
@@ -1046,5 +1194,7 @@ python -m pytest -q
 - 다음 버전에서 처리할 위험과 제한사항
 ```
 
-버전 번호를 변경하면 `README.md`, `SECURITY_REVIEW.md`, `VERSIONING.md`와 이
-문서의 현재 버전·변경 이력을 함께 갱신하고, 테스트 후 버전 커밋을 생성합니다.
+버전 번호를 변경하면 `AGENTS.md`, `README.md`, `FEATURE_CHANGELOG.md`,
+`SECURITY_REVIEW.md`, `VERSIONING.md`와 이 문서의 현재 버전·변경 이력을 함께
+갱신하고, 테스트 후 버전 커밋을 생성합니다. 기능 추가·변경·제거 내용은
+`FEATURE_CHANGELOG.md`에도 같은 버전으로 기록합니다.

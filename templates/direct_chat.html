@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}{{ recipient.username }}님과의 채팅{% endblock %}
+{% block content %}
+<h2>{{ recipient.username }}님과의 1대1 채팅</h2>
+<p><a href="{{ url_for('direct_chat_users') }}">대화 상대 목록</a></p>
+
+<div id="direct_chat">
+  <ul id="direct_messages">
+    {% for message in messages %}
+      <li data-message-id="{{ message.id }}">
+        <strong>{{ message.sender_username }}</strong>:
+        <span>{{ message.message }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+  <p id="direct_chat_status" aria-live="polite"></p>
+  <input
+    id="direct_chat_input"
+    type="text"
+    maxlength="500"
+    autocomplete="off"
+    placeholder="메시지를 입력하세요"
+  >
+  <button id="direct_chat_send" type="button">전송</button>
+</div>
+
+<script type="text/javascript">
+  var currentUserId = {{ user.id|tojson }};
+  var recipientId = {{ recipient.id|tojson }};
+  var directSocket = io({
+    auth: {
+      csrf_token: {{ csrf_token()|tojson }}
+    }
+  });
+
+  function isCurrentConversation(data) {
+    return (
+      data.sender_id === currentUserId &&
+      data.recipient_id === recipientId
+    ) || (
+      data.sender_id === recipientId &&
+      data.recipient_id === currentUserId
+    );
+  }
+
+  function appendDirectMessage(data) {
+    if (!isCurrentConversation(data)) {
+      return;
+    }
+    var messages = document.getElementById('direct_messages');
+    var item = document.createElement('li');
+    item.dataset.messageId = data.message_id;
+
+    var sender = document.createElement('strong');
+    sender.textContent = data.sender_username;
+    item.appendChild(sender);
+    item.appendChild(document.createTextNode(': '));
+
+    var content = document.createElement('span');
+    content.textContent = data.message;
+    item.appendChild(content);
+    messages.appendChild(item);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function sendDirectMessage() {
+    var input = document.getElementById('direct_chat_input');
+    var message = input.value;
+    if (!message) {
+      return;
+    }
+    directSocket.emit(
+      'send_direct_message',
+      {
+        recipient_id: recipientId,
+        message: message
+      },
+      function(result) {
+        if (result && result.ok) {
+          input.value = '';
+        }
+      }
+    );
+  }
+
+  directSocket.on('connect', function() {
+    document.getElementById('direct_chat_status').textContent =
+      '채팅 서버에 연결되었습니다.';
+  });
+  directSocket.on('connect_error', function() {
+    document.getElementById('direct_chat_status').textContent =
+      '채팅 서버에 연결할 수 없습니다.';
+  });
+  directSocket.on('direct_chat_error', function(data) {
+    document.getElementById('direct_chat_status').textContent = data.message;
+  });
+  directSocket.on('direct_message', appendDirectMessage);
+  document.getElementById('direct_chat_send').addEventListener(
+    'click',
+    sendDirectMessage
+  );
+  document.getElementById('direct_chat_input').addEventListener(
+    'keydown',
+    function(event) {
+      if (event.key === 'Enter') {
+        sendDirectMessage();
+      }
+    }
+  );
+</script>
+{% endblock %}

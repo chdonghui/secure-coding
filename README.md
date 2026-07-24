@@ -1,8 +1,8 @@
 # 안전한 중고거래 플랫폼
 
 Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입니다. 회원가입,
-로그인, 마이페이지, 상품 등록·조회·수정·삭제와 내 상품 관리, 실시간 채팅 및
-신고 기능을 포함합니다.
+로그인, 마이페이지, 상품 등록·조회·수정·삭제와 내 상품 관리, 전체·1대1
+실시간 채팅 및 신고 기능을 포함합니다.
 
 이 프로젝트는 [ugonfor/secure-coding](https://github.com/ugonfor/secure-coding)
 저장소에서 가져온 기반 코드를 바탕으로 보안 취약점을 분석하고 개선하는 실습용
@@ -13,8 +13,9 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `1.7`
+- 현재 버전: `2.0`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
+- 버전별 기능 설명: [FEATURE_CHANGELOG.md](FEATURE_CHANGELOG.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
 - 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
 - 버전 및 커밋 규칙: [VERSIONING.md](VERSIONING.md)
@@ -253,6 +254,11 @@ export MARKET_TRUSTED_PROXY_COUNT=1
 메시지는 1~500자이며 브라우저의 `textContent`로 출력됩니다. 기본 전송 제한은
 사용자별 10초에 5건, IP별 1분에 30건이고 동일 메시지는 5초 안에 반복할 수
 없습니다.
+
+상단의 `1대1 채팅` 메뉴에서는 다른 사용자를 선택해 비공개 메시지를 전송할 수
+있습니다. 1대1 메시지는 발신자와 수신자에게만 실시간 전달되고 SQLite에
+저장되며, 대화 화면은 최근 100건을 표시합니다. 전체 채팅과 1대1 채팅은 동일한
+사용자·IP 전송 제한을 공유합니다.
 
 ## 6. 애플리케이션 실행
 

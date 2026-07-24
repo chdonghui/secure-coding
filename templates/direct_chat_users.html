@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}1대1 채팅{% endblock %}
+{% block content %}
+<h2>1대1 채팅</h2>
+<p>대화할 사용자를 선택하세요.</p>
+
+{% if users %}
+  <ul>
+    {% for chat_user in users %}
+      <li>
+        <a href="{{ url_for('direct_chat', recipient_id=chat_user.id) }}">
+          {{ chat_user.username }}
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>대화할 수 있는 다른 사용자가 없습니다.</p>
+{% endif %}
+{% endblock %}

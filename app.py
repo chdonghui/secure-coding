@@ -16,7 +16,7 @@ from functools import wraps
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
-from flask_socketio import SocketIO, disconnect, emit, send
+from flask_socketio import SocketIO, disconnect, emit, join_room, send
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
@@ -46,6 +46,8 @@ CHAT_USER_RATE_WINDOW_SECONDS = 10
 CHAT_IP_RATE_LIMIT = 30
 CHAT_IP_RATE_WINDOW_SECONDS = 60
 CHAT_DUPLICATE_WINDOW_SECONDS = 5
+DIRECT_CHAT_USER_LIST_LIMIT = 100
+DIRECT_CHAT_HISTORY_LIMIT = 100
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
@@ -248,6 +250,92 @@ def create_product_table(cursor):
             seller_id TEXT NOT NULL,
             FOREIGN KEY (seller_id) REFERENCES user(id) ON DELETE RESTRICT
         )
+    """)
+
+
+def create_direct_message_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS direct_message (
+            id TEXT PRIMARY KEY,
+            sender_id TEXT NOT NULL,
+            recipient_id TEXT NOT NULL,
+            message TEXT NOT NULL
+                CHECK(length(trim(message)) BETWEEN
+                    {CHAT_MESSAGE_MIN_LENGTH} AND {CHAT_MESSAGE_MAX_LENGTH})
+                CHECK(instr(message, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            CHECK(sender_id <> recipient_id),
+            FOREIGN KEY (sender_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (recipient_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+
+
+def direct_message_schema_is_current(cursor):
+    columns = {
+        row['name']
+        for row in cursor.execute(
+            'PRAGMA table_info(direct_message)'
+        ).fetchall()
+    }
+    foreign_keys = {
+        (row['from'], row['table'])
+        for row in cursor.execute(
+            'PRAGMA foreign_key_list(direct_message)'
+        ).fetchall()
+    }
+    schema_row = cursor.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'direct_message'
+        """
+    ).fetchone()
+    normalized_schema = ''.join(
+        (schema_row['sql'] if schema_row else '').split()
+    ).lower()
+    return (
+        {
+            'id',
+            'sender_id',
+            'recipient_id',
+            'message',
+            'created_at',
+        }
+        <= columns
+        and {
+            ('sender_id', 'user'),
+            ('recipient_id', 'user'),
+        }
+        <= foreign_keys
+        and 'check(sender_id<>recipient_id)' in normalized_schema
+        and (
+            'check(length(trim(message))between'
+            f'{CHAT_MESSAGE_MIN_LENGTH}and{CHAT_MESSAGE_MAX_LENGTH})'
+        )
+        in normalized_schema
+        and 'check(instr(message,char(0))=0)' in normalized_schema
+        and (
+            "check(typeof(created_at)='integer'andcreated_at>=0)"
+            in normalized_schema
+        )
+    )
+
+
+def ensure_direct_message_schema(cursor):
+    create_direct_message_table(cursor)
+    if not direct_message_schema_is_current(cursor):
+        raise RuntimeError(
+            '기존 1대1 채팅 스키마가 현재 보안 요구사항과 호환되지 않습니다.'
+        )
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS direct_message_sender_recipient_created
+        ON direct_message (sender_id, recipient_id, created_at, id)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS direct_message_recipient_sender_created
+        ON direct_message (recipient_id, sender_id, created_at, id)
     """)
 
 
@@ -813,6 +901,7 @@ def init_db():
         add_user_security_columns(cursor)
         migrate_plaintext_passwords(cursor)
         migrate_product_schema(cursor)
+        ensure_direct_message_schema(cursor)
         # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
         create_report_table(cursor)
         create_report_audit_table(cursor)
@@ -1199,6 +1288,31 @@ def require_product_owner(product):
         abort(403)
 
 
+def normalize_uuid_identifier(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        normalized_value = str(uuid.UUID(value))
+    except (ValueError, AttributeError):
+        return None
+    if normalized_value != value.lower():
+        return None
+    return normalized_value
+
+
+def get_chat_recipient_or_404(recipient_id):
+    normalized_recipient_id = normalize_uuid_identifier(recipient_id)
+    if normalized_recipient_id is None:
+        abort(404)
+    recipient = get_db().execute(
+        'SELECT id, username FROM user WHERE id = ?',
+        (normalized_recipient_id,),
+    ).fetchone()
+    if recipient is None or recipient['id'] == g.current_user['id']:
+        abort(404)
+    return recipient
+
+
 # 기본 라우트
 @app.route('/')
 def index():
@@ -1561,6 +1675,68 @@ def delete_product(product_id):
     return redirect(url_for('manage_products'))
 
 
+# 1대1 채팅 사용자 목록
+@app.route('/chat')
+@login_required
+def direct_chat_users():
+    users = get_db().execute(
+        '''
+        SELECT id, username
+        FROM user
+        WHERE id <> ?
+        ORDER BY username, id
+        LIMIT ?
+        ''',
+        (g.current_user['id'], DIRECT_CHAT_USER_LIST_LIMIT),
+    ).fetchall()
+    return render_template('direct_chat_users.html', users=users)
+
+
+# 1대1 채팅 대화 화면
+@app.route('/chat/<recipient_id>')
+@login_required
+def direct_chat(recipient_id):
+    recipient = get_chat_recipient_or_404(recipient_id)
+    messages = get_db().execute(
+        '''
+        SELECT
+            direct_message.id,
+            direct_message.sender_id,
+            direct_message.recipient_id,
+            direct_message.message,
+            direct_message.created_at,
+            sender.username AS sender_username
+        FROM direct_message
+        JOIN user AS sender ON sender.id = direct_message.sender_id
+        WHERE
+            (
+                direct_message.sender_id = ?
+                AND direct_message.recipient_id = ?
+            )
+            OR
+            (
+                direct_message.sender_id = ?
+                AND direct_message.recipient_id = ?
+            )
+        ORDER BY direct_message.created_at DESC, direct_message.id DESC
+        LIMIT ?
+        ''',
+        (
+            g.current_user['id'],
+            recipient['id'],
+            recipient['id'],
+            g.current_user['id'],
+            DIRECT_CHAT_HISTORY_LIMIT,
+        ),
+    ).fetchall()
+    return render_template(
+        'direct_chat.html',
+        recipient=recipient,
+        messages=list(reversed(messages)),
+        user=g.current_user,
+    )
+
+
 # 신고하기
 @app.route('/report', methods=['GET', 'POST'])
 @login_required
@@ -1803,6 +1979,20 @@ def validate_chat_message(data):
     return message
 
 
+def validate_direct_chat_message(data):
+    if not isinstance(data, dict) or set(data) != {'recipient_id', 'message'}:
+        return None, None
+    recipient_id = normalize_uuid_identifier(data.get('recipient_id'))
+    message = validate_chat_message({'message': data.get('message')})
+    if recipient_id is None or message is None:
+        return None, None
+    return recipient_id, message
+
+
+def direct_chat_room(user_id):
+    return f'direct-chat-user:{user_id}'
+
+
 def prune_chat_rate_limit_state(now):
     windows = {
         'user': CHAT_USER_RATE_WINDOW_SECONDS,
@@ -1856,8 +2046,13 @@ def chat_message_is_duplicate(user_id, message, now):
         return False
 
 
-def reject_chat_event(code, message, should_disconnect=False):
-    emit('chat_error', {'code': code, 'message': message})
+def reject_chat_event(
+    code,
+    message,
+    should_disconnect=False,
+    event_name='chat_error',
+):
+    emit(event_name, {'code': code, 'message': message})
     if should_disconnect:
         disconnect()
     return {'ok': False, 'error': code}
@@ -1867,7 +2062,11 @@ def reject_chat_event(code, message, should_disconnect=False):
 def handle_socket_connect(auth=None):
     if not socket_csrf_is_valid(auth):
         return False
-    return get_authenticated_socket_user() is not None
+    user = get_authenticated_socket_user()
+    if user is None:
+        return False
+    join_room(direct_chat_room(user['id']))
+    return True
 
 
 @socketio.on('send_message')
@@ -1917,6 +2116,107 @@ def handle_send_message_event(data):
     }
     send(outbound_message, broadcast=True)
     return {'ok': True, 'message_id': outbound_message['message_id']}
+
+
+@socketio.on('send_direct_message')
+def handle_send_direct_message_event(data):
+    user = get_authenticated_socket_user()
+    if user is None:
+        return reject_chat_event(
+            'authentication_required',
+            '로그인이 필요합니다.',
+            should_disconnect=True,
+            event_name='direct_chat_error',
+        )
+
+    rate_limit_time = time.monotonic()
+    if not consume_chat_rate_limit(
+        user['id'],
+        get_client_ip_hash(),
+        rate_limit_time,
+    ):
+        return reject_chat_event(
+            'rate_limited',
+            '메시지를 너무 빠르게 보내고 있습니다.',
+            event_name='direct_chat_error',
+        )
+
+    recipient_id, message = validate_direct_chat_message(data)
+    if recipient_id is None or message is None or recipient_id == user['id']:
+        return reject_chat_event(
+            'invalid_message',
+            '메시지 형식을 확인해주세요.',
+            event_name='direct_chat_error',
+        )
+
+    db = get_db()
+    recipient = db.execute(
+        'SELECT id FROM user WHERE id = ?',
+        (recipient_id,),
+    ).fetchone()
+    if recipient is None:
+        return reject_chat_event(
+            'invalid_recipient',
+            '대화 상대를 확인할 수 없습니다.',
+            event_name='direct_chat_error',
+        )
+
+    duplicate_scope = f'direct:{user["id"]}:{recipient_id}'
+    if chat_message_is_duplicate(
+        duplicate_scope,
+        message,
+        rate_limit_time,
+    ):
+        return reject_chat_event(
+            'duplicate_message',
+            '같은 메시지를 연속으로 보낼 수 없습니다.',
+            event_name='direct_chat_error',
+        )
+
+    now = int(time.time())
+    message_id = str(uuid.uuid4())
+    try:
+        db.execute(
+            '''
+            INSERT INTO direct_message (
+                id,
+                sender_id,
+                recipient_id,
+                message,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (message_id, user['id'], recipient_id, message, now),
+        )
+        db.commit()
+    except sqlite3.Error:
+        db.rollback()
+        return reject_chat_event(
+            'message_not_sent',
+            '메시지를 전송할 수 없습니다.',
+            event_name='direct_chat_error',
+        )
+
+    outbound_message = {
+        'message_id': message_id,
+        'sender_id': user['id'],
+        'sender_username': user['username'],
+        'recipient_id': recipient_id,
+        'message': message,
+        'sent_at': now,
+    }
+    emit(
+        'direct_message',
+        outbound_message,
+        to=direct_chat_room(user['id']),
+    )
+    emit(
+        'direct_message',
+        outbound_message,
+        to=direct_chat_room(recipient_id),
+    )
+    return {'ok': True, 'message_id': message_id}
 
 
 @app.errorhandler(400)

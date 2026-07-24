@@ -86,7 +86,7 @@
     #chat {
       margin-top: 40px;
     }
-    #messages {
+    #messages, #direct_messages {
       height: 200px;
       overflow-y: auto;
       border: 1px solid #e0e0e0;
@@ -103,6 +103,7 @@
       <a href="{{ url_for('dashboard') }}">대시보드</a>
       <a href="{{ url_for('profile') }}">마이페이지</a>
       <a href="{{ url_for('manage_products') }}">내 상품 관리</a>
+      <a href="{{ url_for('direct_chat_users') }}">1대1 채팅</a>
       <a href="{{ url_for('report') }}">신고하기</a>
       <form class="nav-form" method="post" action="{{ url_for('logout') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
