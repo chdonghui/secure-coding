@@ -185,12 +185,12 @@ def login_user(client, username, password):
 
 def test_admin_pages_and_actions_require_role_and_csrf(moderation_database):
     unauthenticated = market.app.test_client()
-    response = unauthenticated.get('/admin/moderation')
+    response = unauthenticated.get('/admin')
     assert response.status_code == 302
     assert response.headers['Location'].endswith('/login')
 
     member, member_token = authenticated_client(REPORTER_ID)
-    assert member.get('/admin/moderation').status_code == 403
+    assert member.get('/admin').status_code == 403
     assert member.post(
         f'/admin/products/{PRODUCT_ID}/remove',
         data={'csrf_token': member_token, 'reason': VALID_REASON},
@@ -203,7 +203,9 @@ def test_admin_pages_and_actions_require_role_and_csrf(moderation_database):
     ).status_code == 400
     assert fetch_count('product_moderation') == 0
 
-    page = administrator.get('/admin/moderation').get_data(as_text=True)
+    page = administrator.get('/admin').get_data(as_text=True)
+    assert '<h2>관리자 페이지</h2>' in page
+    assert '>관리자 페이지</a>' in page
     assert '신고된 불량 상품' in page
     assert 'bad_actor' in page
     assert '신고 수: 1' in page
@@ -211,6 +213,23 @@ def test_admin_pages_and_actions_require_role_and_csrf(moderation_database):
         'SELECT password FROM user WHERE id = ?',
         (TARGET_ID,),
     )['password'] not in page
+
+
+def test_legacy_admin_path_preserves_access_control_and_redirects(
+    moderation_database,
+):
+    unauthenticated = market.app.test_client()
+    response = unauthenticated.get('/admin/moderation')
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/login')
+
+    member, _ = authenticated_client(REPORTER_ID)
+    assert member.get('/admin/moderation').status_code == 403
+
+    administrator, _ = authenticated_client(ADMIN_ID)
+    response = administrator.get('/admin/moderation')
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/admin')
 
 
 def test_admin_removal_hides_product_but_preserves_reports_and_audit(
@@ -223,7 +242,7 @@ def test_admin_removal_hides_product_but_preserves_reports_and_audit(
         data={'csrf_token': token, 'reason': reason},
     )
     assert response.status_code == 302
-    assert response.headers['Location'].endswith('/admin/moderation')
+    assert response.headers['Location'].endswith('/admin')
 
     assert fetch_one(
         'SELECT id FROM product WHERE id = ?',
@@ -263,7 +282,7 @@ def test_admin_removal_hides_product_but_preserves_reports_and_audit(
         '/products/manage'
     ).get_data(as_text=True)
 
-    audit_page = administrator.get('/admin/moderation').get_data(as_text=True)
+    audit_page = administrator.get('/admin').get_data(as_text=True)
     assert '<script>alert("moderation")</script>' not in audit_page
     assert '&lt;script&gt;alert' in audit_page
 
@@ -701,7 +720,7 @@ def test_report_review_requires_recent_auth_and_is_append_only(
         connection.commit()
     finally:
         connection.close()
-    page = administrator.get('/admin/moderation').get_data(as_text=True)
+    page = administrator.get('/admin').get_data(as_text=True)
     assert xss_reason not in page
     assert '&lt;script&gt;alert' in page
     assert '처리 완료' in page

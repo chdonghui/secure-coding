@@ -546,7 +546,7 @@ def migrate_moderation_metadata(cursor):
     ).fetchone()
     if incomplete_product_snapshot or incomplete_audit_snapshot:
         raise RuntimeError(
-            '기존 관리자 제재 기록의 Snapshot을 안전하게 복원할 수 없습니다.'
+            '기존 관리자 처리 기록의 Snapshot을 안전하게 복원할 수 없습니다.'
         )
 
 
@@ -727,7 +727,7 @@ def ensure_moderation_schema(cursor):
     migrate_moderation_metadata(cursor)
     if not moderation_schema_is_current(cursor):
         raise RuntimeError(
-            '기존 관리자 제재 스키마가 현재 보안 요구사항과 호환되지 않습니다.'
+            '기존 관리자 처리 스키마가 현재 보안 요구사항과 호환되지 않습니다.'
         )
     cursor.execute("""
         CREATE TRIGGER IF NOT EXISTS validate_product_moderation_admin
@@ -3083,9 +3083,9 @@ def delete_product(product_id):
     return redirect(url_for('manage_products'))
 
 
-@app.route('/admin/moderation')
+@app.route('/admin')
 @admin_required
-def admin_moderation():
+def admin_dashboard():
     db = get_db()
     product_page = get_page_number('product_page')
     user_page = get_page_number('user_page')
@@ -3229,7 +3229,7 @@ def admin_moderation():
         (PAGE_SIZE, (audit_page - 1) * PAGE_SIZE),
     ).fetchall()
     return render_template(
-        'admin_moderation.html',
+        'admin_dashboard.html',
         products=products,
         users=users,
         reports=reports,
@@ -3239,6 +3239,12 @@ def admin_moderation():
         report_pagination=report_pagination,
         audit_pagination=audit_pagination,
     )
+
+
+@app.route('/admin/moderation')
+@admin_required
+def legacy_admin_moderation():
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/products/<product_id>/remove', methods=['POST'])
@@ -3253,9 +3259,9 @@ def admin_remove_product(product_id):
     )
     if validation_error:
         flash(validation_error)
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
     if not enforce_admin_action_authorization():
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
 
     db = get_db()
     cursor = db.cursor()
@@ -3317,7 +3323,7 @@ def admin_remove_product(product_id):
         abort(400)
 
     flash('불량 상품이 관리 삭제되었습니다.')
-    return redirect(url_for('admin_moderation'))
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/users/<user_id>/dormant', methods=['POST'])
@@ -3332,9 +3338,9 @@ def admin_dormant_user(user_id):
     )
     if validation_error:
         flash(validation_error)
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
     if not enforce_admin_action_authorization():
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
 
     db = get_db()
     cursor = db.cursor()
@@ -3407,7 +3413,7 @@ def admin_dormant_user(user_id):
 
     disconnect_user_sockets(target_user['id'])
     flash('불량 사용자를 휴면 처리했습니다.')
-    return redirect(url_for('admin_moderation'))
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/users/<user_id>/reactivate', methods=['POST'])
@@ -3422,9 +3428,9 @@ def admin_reactivate_user(user_id):
     )
     if validation_error:
         flash(validation_error)
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
     if not enforce_admin_action_authorization():
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
 
     db = get_db()
     cursor = db.cursor()
@@ -3465,7 +3471,7 @@ def admin_reactivate_user(user_id):
         abort(400)
 
     flash('사용자 휴면을 해제했습니다.')
-    return redirect(url_for('admin_moderation'))
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/reports/<report_id>/review', methods=['POST'])
@@ -3483,9 +3489,9 @@ def admin_review_report(report_id):
     )
     if validation_error:
         flash(validation_error)
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
     if not enforce_admin_action_authorization():
-        return redirect(url_for('admin_moderation'))
+        return redirect(url_for('admin_dashboard'))
 
     db = get_db()
     cursor = db.cursor()
@@ -3528,7 +3534,7 @@ def admin_review_report(report_id):
         abort(400)
 
     flash('신고 검토 상태를 저장했습니다.')
-    return redirect(url_for('admin_moderation'))
+    return redirect(url_for('admin_dashboard'))
 
 
 # 1대1 채팅 사용자 목록

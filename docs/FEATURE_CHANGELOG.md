@@ -9,7 +9,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `3.1` |
+| Current Version | `3.2` |
 | 기준일 | `2026-07-24` |
 | 기반 프로젝트 | [ugonfor/secure-coding](https://github.com/ugonfor/secure-coding) |
 | 프로젝트 목적 | 웹 보안 교육 및 실습 |
@@ -18,6 +18,7 @@
 
 | Version | 변경 구분 | 주요 기능 |
 |---|---|---|
+| `3.2` | 관리자 UX·실행 개선 | 통합 관리자 페이지와 격리된 빠른 실행 테스트 계정 |
 | `3.1` | 보안·운영 개선 | 계정·상품·관리 작업 남용 방지, 신고 검토, 채팅 차단과 페이지네이션 |
 | `3.0` | 신규 핵심 기능 | 관리자 권한 기반 불량 상품 관리 삭제와 사용자 휴면 |
 | `2.1` | 신규·개선 | 회원 탈퇴와 비로그인 상품 목록·상품 ID 표시 |
@@ -30,6 +31,54 @@
 | `1.2` | 신규·개선 | 상품 수정·삭제와 안전한 상품 관리 |
 | `1.1` | 기능 강화 | 안전한 회원·로그인·프로필·세션 처리 |
 | `1.0` | 최초 기준 | 회원, 상품, 전체 채팅, 신고 기본 기능 |
+
+---
+
+## Version 3.2
+
+### 통합 관리자 페이지
+
+기존의 제재 중심 화면 명칭을 전체 관리 기능을 나타내는 `관리자 페이지`로
+변경했습니다. 관리자는 상단 메뉴에서 `/admin`으로 이동해 다음 기능을 한곳에서
+사용합니다.
+
+- 상품 목록과 신고 수 확인 및 관리 삭제
+- 사용자 목록과 신고 수 확인 및 휴면·재활성화
+- 신고 사유와 처리 상태 확인 및 완료·반려
+- 최근 관리자 처리 감사 이력 조회
+
+로그인과 `is_admin=1` 역할을 모두 확인한 관리자만 접근할 수 있습니다. 기존
+`/admin/moderation` 주소도 같은 권한 검사를 거친 뒤 `/admin`으로 이동하므로
+저장된 북마크는 계속 사용할 수 있습니다. 상태 변경 경로와 CSRF·재인증·감사
+정책은 Version 3.1과 동일하게 유지합니다.
+
+### 관리자·일반 사용자 빠른 실행
+
+저장소 루트에서 다음 한 줄로 격리된 실습 환경을 실행할 수 있습니다.
+
+```sh
+./scripts/quickstart_demo.sh
+```
+
+도구는 Conda의 `secure_coding` 환경을 선택하고 저장소 밖 임시 디렉터리에 별도
+DB를 만듭니다. 무작위 비밀번호와 Argon2id 해시를 사용하는 `quick_admin`,
+`quick_user`, 샘플 상품과 신고를 준비하며 종료 시 임시 DB를 삭제합니다.
+일반 실행용 `market.db`는 읽거나 변경하지 않습니다.
+
+관련 파일:
+
+- `app.py`
+- `templates/base.html`, `templates/admin_dashboard.html`
+- `scripts/quickstart_demo.py`, `scripts/quickstart_demo.sh`
+- `tests/test_admin_moderation_security.py`, `tests/test_quickstart_demo.py`
+- `docs/QUICK_START.md`, `docs/ADMIN_QUICK_START.md`, `docs/TESTING.md`
+
+제한사항:
+
+- 빠른 실행 계정은 로컬 실습 전용이며 서버 종료 후 유지되지 않습니다.
+- 실제 운영 관리자 계정은 일반 계정을 만든 뒤 로컬 역할 관리 도구로 명시적으로
+  권한을 부여해야 합니다.
+- 개발 서버와 빠른 실행 도구는 실제 운영 배포 방식이 아닙니다.
 
 ---
 
@@ -441,7 +490,7 @@ Version 1.0의 전체 공개형 채팅 흐름을 인증된 사용자 중심으�
 
 - `scripts/database_backup.py`
 - `tests/test_database_backup.py`
-- 사용법: [README.md](README.md#8-데이터베이스-백업과-복구-검증)
+- 사용법: [README.md](../README.md#8-데이터베이스-백업과-복구-검증)
 
 데이터·환경 변경:
 

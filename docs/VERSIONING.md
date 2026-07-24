@@ -5,17 +5,17 @@
 
 ## 현재 버전
 
-`3.1`
+`3.2`
 
 현재 버전은 다음 문서에서 동일하게 유지해야 합니다.
 
-- `README.md`의 현재 버전
-- `FEATURE_CHANGELOG.md`의 `Current Version`과 최신 기능 이력
-- `SECURITY_CHANGELOG.md`의 최신 버전과 버전 빠른 보기
-- `SECURITY_REVIEW.md`의 `Current Version`
+- 루트 `README.md`의 현재 버전
+- `docs/FEATURE_CHANGELOG.md`의 `Current Version`과 최신 기능 이력
+- `docs/SECURITY_CHANGELOG.md`의 최신 버전과 버전 빠른 보기
+- `docs/SECURITY_REVIEW.md`의 `Current Version`
 - 이 문서의 현재 버전
-- `AGENTS.md`의 현재 프로젝트 버전
-- `SECURITY_REVIEW.md`의 변경 이력
+- 루트 `AGENTS.md`의 현재 프로젝트 버전
+- `docs/SECURITY_REVIEW.md`의 변경 이력
 
 ## 버전 형식
 
@@ -95,13 +95,13 @@ Patch 번호를 커밋 식별자로만 사용하면 README의 현재 릴리스 �
 2. 코드, 템플릿, 스키마 또는 마이그레이션을 구현합니다.
 3. 정상 동작, 보안 및 회귀 테스트를 실행합니다.
 4. 테스트가 실패하면 버전 번호를 올리거나 커밋하지 않습니다.
-5. `AGENTS.md`, `README.md`, `FEATURE_CHANGELOG.md`,
-   `SECURITY_CHANGELOG.md`, `SECURITY_REVIEW.md`, `VERSIONING.md`의 버전을
-   동일하게 갱신합니다.
-6. 기능 추가·변경·제거가 있다면 `FEATURE_CHANGELOG.md`에 목적, 사용 흐름,
-   권한, 관련 파일과 제한사항을 기록합니다.
-7. `SECURITY_CHANGELOG.md`에 상세 보안 조치와 테스트 근거를 추가하고,
-   `SECURITY_REVIEW.md` 변경 이력에는 요약을 추가합니다.
+5. `AGENTS.md`, `README.md`, `docs/FEATURE_CHANGELOG.md`,
+   `docs/SECURITY_CHANGELOG.md`, `docs/SECURITY_REVIEW.md`,
+   `docs/VERSIONING.md`의 버전을 동일하게 갱신합니다.
+6. 기능 추가·변경·제거가 있다면 `docs/FEATURE_CHANGELOG.md`에 목적, 사용
+   흐름, 권한, 관련 파일과 제한사항을 기록합니다.
+7. `docs/SECURITY_CHANGELOG.md`에 상세 보안 조치와 테스트 근거를 추가하고,
+   `docs/SECURITY_REVIEW.md` 변경 이력에는 요약을 추가합니다.
 8. `git status`와 `git diff`로 버전 범위 밖의 파일이나 비밀정보가 없는지
    검토합니다.
 9. 해당 버전에 속하는 파일만 스테이징합니다.
@@ -169,10 +169,11 @@ git show --stat --oneline HEAD
 - [ ] 변경 내용이 새 버전의 범위와 일치한다.
 - [ ] 애플리케이션 테스트가 모두 통과한다.
 - [ ] 데이터베이스 변경에 마이그레이션 또는 호환 방안이 있다.
-- [ ] `AGENTS.md`, `README.md`, `FEATURE_CHANGELOG.md`,
-      `SECURITY_CHANGELOG.md`, `SECURITY_REVIEW.md`, `VERSIONING.md`의 버전이
-      같다.
-- [ ] 기능 추가·변경·제거 내용과 제한사항이 `FEATURE_CHANGELOG.md`에 기록되었다.
+- [ ] `AGENTS.md`, `README.md`, `docs/FEATURE_CHANGELOG.md`,
+      `docs/SECURITY_CHANGELOG.md`, `docs/SECURITY_REVIEW.md`,
+      `docs/VERSIONING.md`의 버전이 같다.
+- [ ] 기능 추가·변경·제거 내용과 제한사항이
+      `docs/FEATURE_CHANGELOG.md`에 기록되었다.
 - [ ] 보안 체크리스트와 변경 이력이 갱신되었다.
 - [ ] 비밀번호, 세션 비밀키, API 토큰 및 개인정보가 포함되지 않았다.
 - [ ] 실제 DB, 백업, 캐시 및 임시 파일이 새로 포함되지 않았다.

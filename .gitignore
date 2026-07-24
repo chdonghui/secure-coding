@@ -19,7 +19,9 @@ Network Trash Folder
 Temporary Items
 
 # Local SQLite runtime data
-market.db
+*.db
+*.sqlite
+*.sqlite3
 *.db-journal
 *.db-shm
 *.db-wal

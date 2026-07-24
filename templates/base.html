@@ -112,7 +112,7 @@
       <a href="{{ url_for('direct_chat_users') }}">1대1 채팅</a>
       <a href="{{ url_for('report') }}">신고하기</a>
       {% if g.current_user and g.current_user.is_admin == 1 %}
-        <a href="{{ url_for('admin_moderation') }}">관리자 제재</a>
+        <a href="{{ url_for('admin_dashboard') }}">관리자 페이지</a>
       {% endif %}
       <form class="nav-form" method="post" action="{{ url_for('logout') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

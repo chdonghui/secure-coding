@@ -1,8 +1,9 @@
 {% extends "base.html" %}
-{% block title %}관리자 제재{% endblock %}
+{% block title %}관리자 페이지{% endblock %}
 {% block content %}
-<h2>관리자 제재</h2>
+<h2>관리자 페이지</h2>
 <p>
+  상품, 사용자, 신고와 최근 감사 이력을 한곳에서 관리합니다.
   상품 관리 삭제와 사용자 휴면은 서비스 노출과 접근을 즉시 차단합니다.
   신고·대화·감사 기록은 증거 보존을 위해 삭제하지 않습니다.
 </p>
@@ -51,7 +52,7 @@
 <nav aria-label="관리 상품 페이지">
   {% if product_pagination.has_previous %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       product_page=product_pagination.page - 1
     ) }}">이전</a>
   {% endif %}
@@ -60,7 +61,7 @@
   </span>
   {% if product_pagination.has_next %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       product_page=product_pagination.page + 1
     ) }}">다음</a>
   {% endif %}
@@ -141,14 +142,14 @@
 <nav aria-label="관리 사용자 페이지">
   {% if user_pagination.has_previous %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       user_page=user_pagination.page - 1
     ) }}">이전</a>
   {% endif %}
   <span>{{ user_pagination.page }} / {{ user_pagination.total_pages }}</span>
   {% if user_pagination.has_next %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       user_page=user_pagination.page + 1
     ) }}">다음</a>
   {% endif %}
@@ -212,7 +213,7 @@
 <nav aria-label="신고 검토 페이지">
   {% if report_pagination.has_previous %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       report_page=report_pagination.page - 1
     ) }}">이전</a>
   {% endif %}
@@ -221,7 +222,7 @@
   </span>
   {% if report_pagination.has_next %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       report_page=report_pagination.page + 1
     ) }}">다음</a>
   {% endif %}
@@ -251,14 +252,14 @@
 <nav aria-label="감사 이력 페이지">
   {% if audit_pagination.has_previous %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       audit_page=audit_pagination.page - 1
     ) }}">이전</a>
   {% endif %}
   <span>{{ audit_pagination.page }} / {{ audit_pagination.total_pages }}</span>
   {% if audit_pagination.has_next %}
     <a href="{{ url_for(
-      'admin_moderation',
+      'admin_dashboard',
       audit_page=audit_pagination.page + 1
     ) }}">다음</a>
   {% endif %}

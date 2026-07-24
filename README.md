@@ -15,12 +15,18 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `3.1`
+- 현재 버전: `3.2`
+- 빠른 실행: [docs/QUICK_START.md](docs/QUICK_START.md)
+- 관리자 계정 빠른 시작:
+  [docs/ADMIN_QUICK_START.md](docs/ADMIN_QUICK_START.md)
+- 테스트: [docs/TESTING.md](docs/TESTING.md)
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
-- 버전별 기능 설명: [FEATURE_CHANGELOG.md](FEATURE_CHANGELOG.md)
-- 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
-- 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
-- 버전 및 커밋 규칙: [VERSIONING.md](VERSIONING.md)
+- 버전별 기능 설명:
+  [docs/FEATURE_CHANGELOG.md](docs/FEATURE_CHANGELOG.md)
+- 버전별 보안 조치:
+  [docs/SECURITY_CHANGELOG.md](docs/SECURITY_CHANGELOG.md)
+- 보안 현황: [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md)
+- 버전 및 커밋 규칙: [docs/VERSIONING.md](docs/VERSIONING.md)
 
 ## 개발 환경
 
@@ -319,93 +325,87 @@ Token을 확인합니다.
 차단·해제할 수 있고 어느 한쪽이 차단하면 직접 메시지 전송이 거부됩니다. 전체
 채팅과 1대1 채팅은 동일한 사용자·IP 전송 제한을 공유합니다.
 
-## 6. 애플리케이션 실행
+## 6. 실행과 배포
+
+모든 명령은 GitHub에서 내려받은 저장소 루트에서 상대경로로 실행합니다.
+일반 사용자와 관리자는 별도 서버가 아니라 하나의 애플리케이션과 DB를 사용하며
+계정 역할로 접근 권한만 구분합니다.
+
+### 테스트 계정이 포함된 가장 빠른 로컬 실행
+
+다음 명령은 저장소 밖의 임시 DB에 관리자·일반 사용자, 샘플 상품과 신고를
+자동으로 만들고 서버를 실행합니다.
+
+```sh
+./scripts/quickstart_demo.sh
+```
+
+터미널에 출력된 무작위 임시 비밀번호로 로그인합니다. `Ctrl+C`로 종료하면 임시
+DB와 계정이 삭제되며 일반 실행용 `market.db`는 변경하지 않습니다. 자세한
+흐름은 [빠른 실행 가이드](docs/QUICK_START.md)와
+[관리자 계정 빠른 시작](docs/ADMIN_QUICK_START.md)을 참고합니다.
+
+### 데이터를 유지하는 로컬 실행
 
 ```sh
 conda activate secure_coding
-python app.py
+SECURE_CODING_PYTHON="${CONDA_PREFIX}/bin/python"
+
+export MARKET_SECRET_KEY="$(
+  "${SECURE_CODING_PYTHON}" -c \
+    'import secrets; print(secrets.token_urlsafe(48))'
+)"
+export MARKET_COOKIE_SECURE=false
+export MARKET_DEBUG=false
+export MARKET_REQUIRE_HTTPS=false
+
+"${SECURE_CODING_PYTHON}" app.py
 ```
 
-브라우저에서 다음 주소로 접속합니다.
+접속 주소는 `http://127.0.0.1:5000`이며 SQLite 데이터는 Git에서 제외된 로컬
+`market.db`에 저장됩니다. 빈 DB도 Git에 올리지 않으며 애플리케이션이 최초
+실행에서 필요한 스키마를 생성합니다.
 
-```text
-http://127.0.0.1:5000
-```
+### 외부 HTTPS 실습
 
-로그인하지 않아도 `/products`에서 상품 제목, 가격, 판매자와 상품 ID를 확인할
-수 있습니다. 상품 등록·관리, 전체·1대1 채팅, 신고와 마이페이지는 로그인 후
-사용합니다.
-
-회원 탈퇴는 마이페이지에서 현재 비밀번호와 `회원탈퇴` 확인 문구를 입력해
-진행합니다. 탈퇴 계정은 익명화되고 모든 세션이 종료되며 상품은 공개 목록에서
-숨겨집니다. 신고·대화 등 참조 무결성이 필요한 기록은 보존됩니다.
-
-### 관리자 권한 설정과 제재 화면
-
-Version `3.1` 마이그레이션은 기존 사용자를 일반 사용자로 유지하며 관리자 권한을
-자동 부여하지 않습니다. 애플리케이션을 한 번 실행해 최신 스키마를 만든 뒤,
-로컬 터미널에서 신뢰하는 기존 사용자에게 권한을 명시적으로 부여합니다.
+ngrok은 로컬 실습 서버를 일시적으로 외부에 공개할 때만 사용합니다.
 
 ```sh
-python scripts/admin_user.py --database market.db grant \
-  --username "<ADMIN_USERNAME>" \
-  --operator "<OPERATOR_ID>" \
-  --reason "<10~500자의 권한 부여 사유>"
+export MARKET_COOKIE_SECURE=true
+export MARKET_DEBUG=false
+export MARKET_REQUIRE_HTTPS=true
+export MARKET_TRUSTED_PROXY_COUNT=1
+export MARKET_TRUSTED_HOSTS="<ASSIGNED_NGROK_HOST>"
+
+"${SECURE_CODING_PYTHON}" app.py
 ```
 
-활성 관리자 목록 확인과 권한 해제:
-
-```sh
-python scripts/admin_user.py --database market.db list
-python scripts/admin_user.py --database market.db revoke \
-  --username "<ADMIN_USERNAME>" \
-  --operator "<OPERATOR_ID>" \
-  --reason "<10~500자의 권한 해제 사유>"
-```
-
-역할 변경은 대상의 기존 세션을 무효화하고 추가 전용 감사 로그에 운영자·대상·
-사유·시각을 남깁니다. `--operator`를 생략하면 현재 OS 사용자명을 기록합니다.
-마지막 활성 관리자의 권한은 해제할 수 없습니다. 관리자 계정은 권한을 먼저
-해제해야 회원 탈퇴할 수 있습니다. 관리자 계정으로 로그인하면
-상단의 `관리자 제재` 메뉴에서 다음 작업을 수행할 수 있습니다.
-
-- 신고 사유와 상태를 확인하고 승인 완료 또는 기각 처리
-- 신고 수를 참고해 불량 상품을 관리 삭제
-- 일반 사용자를 휴면 처리하고 기존 HTTP·Socket 세션 종료
-- 휴면 사용자 재활성화
-- 최근 관리자 처리 감사 이력 확인
-
-관리 삭제된 상품은 공개·상세·소유자 관리 화면에서 숨겨지지만 신고 증거와 감사
-무결성을 위해 DB 행을 물리적으로 지우지 않습니다. 휴면 사용자는 로그인·채팅·
-신고 대상에서 제외되고 등록 상품도 숨겨집니다. 관리자 자신과 다른 관리자는
-휴면 처리할 수 없습니다. 관리자 상태 변경은 최근 인증 또는 현재 비밀번호
-확인을 요구하고 계정별 처리 속도도 제한합니다.
-
-### ngrok으로 외부 HTTPS 주소 열기
-
-애플리케이션은 `MARKET_COOKIE_SECURE=true`로 실행하고, 다른 터미널에서 다음
-명령을 실행합니다.
+다른 터미널에서 다음 명령을 실행합니다.
 
 ```sh
 ngrok http 5000
 ```
 
-ngrok이 표시한 `https://...ngrok...` 주소로 접속합니다. 이 개발 서버와 ngrok
-터널은 테스트 용도이며 운영 배포 방식으로 사용하지 않습니다. 실행 전에 표시된
-주소의 Host를 `MARKET_TRUSTED_HOSTS`에 설정해야 합니다.
+`MARKET_TRUSTED_HOSTS`에는 ngrok이 할당한 주소에서 `https://`와 경로를 제외한
+Host만 입력합니다.
 
-## 7. 보안 테스트
+### 실제 운영 배포
 
-```sh
-conda activate secure_coding
-python -m pytest -q
-python -m pip check
-python -m pip_audit --require-hashes -r requirements.lock
-```
+현재 저장소에는 검증된 운영용 WSGI·WebSocket 서버, 중앙 Rate Limit 저장소,
+운영 DB, 중앙 로그 필터링과 TLS 종료 구성이 없습니다. 따라서 `python app.py`,
+빠른 실행 도구와 ngrok은 모두 교육·로컬 실습용이며 실제 운영 배포 방법으로
+사용하지 않습니다.
 
-현재 버전에서 검증하는 보안 시나리오와 결과는
-[SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md), 전체 보안 상태와 남은 작업은
-[SECURITY_REVIEW.md](SECURITY_REVIEW.md)에서 확인합니다.
+운영 배포를 추가하려면 프로덕션 서버와 리버스 프록시, HTTPS/WSS 인증서,
+지속되는 `MARKET_SECRET_KEY`, `MARKET_COOKIE_SECURE=true`,
+`MARKET_REQUIRE_HTTPS=true`, 정확한 신뢰 Host·프록시 수, 운영 DB·백업·중앙
+Rate Limit과 로그 보호를 별도 구현하고 배포 환경에서 검증해야 합니다.
+
+## 7. 테스트
+
+자동 테스트, 관리자 테스트, 의존성 감사와 DB 격리 정책은
+[테스트 가이드](docs/TESTING.md)에서 별도로 관리합니다. 현재 버전의 검증
+결과는 [보안 변경 이력](docs/SECURITY_CHANGELOG.md)에서 확인합니다.
 
 ## 8. 데이터베이스 백업과 복구 검증
 

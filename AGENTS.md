@@ -9,7 +9,7 @@
   기반 코드를 사용한 웹 보안 실습 프로젝트입니다.
 - 교육 및 실습 목적이며, 현재 개발 서버와 설정을 그대로 운영 환경에 배포하지
   않습니다.
-- 현재 프로젝트 버전은 `3.1`입니다.
+- 현재 프로젝트 버전은 `3.2`입니다.
 
 ## 작업 시작 시 읽을 문서
 
@@ -17,10 +17,10 @@
 
 1. `AGENTS.md`: AI 및 코딩 에이전트의 필수 작업 규칙
 2. `README.md`: 현재 버전, 개발환경, 설치, 실행 및 테스트 방법
-3. `FEATURE_CHANGELOG.md`: 버전별 추가·변경·제거 기능과 사용 흐름
-4. `SECURITY_REVIEW.md`: 현재 코드 기준 보안 체크리스트와 남은 작업
-5. `SECURITY_CHANGELOG.md`: 버전별 상세 보안 조치와 검증 이력
-6. `VERSIONING.md`: 버전 결정, 테스트 및 필수 커밋 절차
+3. `docs/FEATURE_CHANGELOG.md`: 버전별 추가·변경·제거 기능과 사용 흐름
+4. `docs/SECURITY_REVIEW.md`: 현재 코드 기준 보안 체크리스트와 남은 작업
+5. `docs/SECURITY_CHANGELOG.md`: 버전별 상세 보안 조치와 검증 이력
+6. `docs/VERSIONING.md`: 버전 결정, 테스트 및 필수 커밋 절차
 
 문서와 실제 코드가 다르면 코드를 확인해 근거를 확보한 후 관련 문서를 함께
 수정합니다. 문서 내용만 믿고 보안 항목을 완료 처리하지 않습니다.
@@ -32,10 +32,10 @@
 - 현재 버전과 관련 문서 링크를 제공합니다.
 - 개발환경, 설치, 의존성, 실행 및 테스트 방법을 설명합니다.
 - 버전별 상세 기능·보안 조치나 긴 보안 체크리스트를 직접 작성하지 않습니다.
-- 기능은 `FEATURE_CHANGELOG.md`, 상세 보안 내용은 `SECURITY_CHANGELOG.md`와
-  `SECURITY_REVIEW.md`로 연결합니다.
+- 기능은 `docs/FEATURE_CHANGELOG.md`, 상세 보안 내용은
+  `docs/SECURITY_CHANGELOG.md`와 `docs/SECURITY_REVIEW.md`로 연결합니다.
 
-### `FEATURE_CHANGELOG.md`
+### `docs/FEATURE_CHANGELOG.md`
 
 - 버전별로 새로 추가하거나 변경·제거한 기능을 사용자 관점에서 기록합니다.
 - 기능의 목적, 접근 경로, 사용 흐름, 접근 권한, 관련 파일과 제한사항을
@@ -43,9 +43,10 @@
 - 기능 추가가 없는 버전은 보안·운영 개선만 있었음을 명시합니다.
 - 최신 버전을 문서 위쪽에 배치하고 실제 구현과 테스트가 확인된 기능만
   기록합니다.
-- 보안 구현의 상세 근거는 중복하지 않고 `SECURITY_CHANGELOG.md`로 연결합니다.
+- 보안 구현의 상세 근거는 중복하지 않고
+  `docs/SECURITY_CHANGELOG.md`로 연결합니다.
 
-### `SECURITY_CHANGELOG.md`
+### `docs/SECURITY_CHANGELOG.md`
 
 - 버전별로 실제 적용한 보안 조치와 검증 결과를 기록합니다.
 - 최신 버전을 문서 위쪽에 배치합니다.
@@ -59,14 +60,15 @@
   7. 다음 버전에 남은 보안 항목
 - 적용하지 않았거나 검증하지 않은 조치를 완료로 기록하지 않습니다.
 
-### `SECURITY_REVIEW.md`
+### `docs/SECURITY_REVIEW.md`
 
 - 현재 코드 전체를 기준으로 적용, 미적용, 부분 적용 및 N/A 상태를 관리합니다.
 - 보안 구현을 완료하면 체크박스와 코드 근거를 갱신합니다.
-- 상세한 과거 버전 내용은 중복 작성하지 않고 `SECURITY_CHANGELOG.md`로
+- 상세한 과거 버전 내용은 중복 작성하지 않고
+  `docs/SECURITY_CHANGELOG.md`로
   연결합니다.
 
-### `VERSIONING.md`
+### `docs/VERSIONING.md`
 
 - Major/Minor 결정 기준, 사용자 요청 Patch 커밋과 버전 커밋 절차의 단일 기준
   문서입니다.
@@ -94,7 +96,7 @@
   변경하지 않습니다. 사용자가 Patch를 프로젝트 버전으로 올리도록 요청하면
   모든 버전 문서를 함께 갱신합니다.
 - 버전 판단이 모호하면 코드 변경 범위와 데이터 호환성을 확인하고
-  `VERSIONING.md`를 우선합니다.
+  `docs/VERSIONING.md`를 우선합니다.
 
 ## 버전 변경 시 필수 작업
 
@@ -106,14 +108,14 @@
 4. 다음 문서의 버전을 동일하게 갱신합니다.
    - `AGENTS.md`
    - `README.md`
-   - `FEATURE_CHANGELOG.md`
-   - `SECURITY_CHANGELOG.md`
-   - `SECURITY_REVIEW.md`
-   - `VERSIONING.md`
-5. 기능을 추가·변경·제거했다면 `FEATURE_CHANGELOG.md`에 목적, 사용 흐름,
-   권한, 관련 파일과 제한사항을 기록합니다.
-6. `SECURITY_CHANGELOG.md`에 상세 조치와 테스트 근거를 추가합니다.
-7. `SECURITY_REVIEW.md`의 현재 상태와 요약 변경 이력을 갱신합니다.
+   - `docs/FEATURE_CHANGELOG.md`
+   - `docs/SECURITY_CHANGELOG.md`
+   - `docs/SECURITY_REVIEW.md`
+   - `docs/VERSIONING.md`
+5. 기능을 추가·변경·제거했다면 `docs/FEATURE_CHANGELOG.md`에 목적, 사용
+   흐름, 권한, 관련 파일과 제한사항을 기록합니다.
+6. `docs/SECURITY_CHANGELOG.md`에 상세 조치와 테스트 근거를 추가합니다.
+7. `docs/SECURITY_REVIEW.md`의 현재 상태와 요약 변경 이력을 갱신합니다.
 8. `git diff --check`, `git diff`, `git status --short`로 변경 범위와
    비밀정보 포함 여부를 확인합니다.
 9. 사용자가 커밋하지 말라고 명시하지 않았다면 해당 버전에 속한 파일만
