@@ -16,11 +16,12 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `5.0`
+- 현재 버전: `5.1`
 - 빠른 실행: [docs/QUICK_START.md](docs/QUICK_START.md)
 - 관리자 계정 빠른 시작:
   [docs/ADMIN_QUICK_START.md](docs/ADMIN_QUICK_START.md)
 - 테스트: [docs/TESTING.md](docs/TESTING.md)
+- 소프트웨어 개발 주기 현황: [docs/SDLC.md](docs/SDLC.md)
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 기능 설명:
   [docs/FEATURE_CHANGELOG.md](docs/FEATURE_CHANGELOG.md)

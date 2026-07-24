@@ -3,6 +3,19 @@
 {% block content %}
 <h2>상품 목록</h2>
 
+<form method="get" role="search">
+  <label for="product_search">상품 검색</label>
+  <input
+    id="product_search"
+    type="search"
+    name="q"
+    value="{{ search_query }}"
+    maxlength="100"
+    placeholder="상품명이나 설명을 검색하세요"
+  >
+  <button type="submit">검색</button>
+</form>
+
 {% if session.get('user_id') %}
   <p><a href="{{ url_for('new_product') }}">새 상품 등록</a></p>
 {% else %}
@@ -17,7 +30,7 @@
           {{ product.title }}
         </a>
         <p>상품 ID: <code>{{ product.id }}</code></p>
-        <p>가격: {{ product.price }}</p>
+        <p>가격: {{ "{:,}".format(product.price) }}원</p>
         <p>판매자: {{ product.seller_username }}</p>
       </li>
     {% endfor %}
@@ -28,11 +41,11 @@
 
 <nav aria-label="상품 목록 페이지">
   {% if pagination.has_previous %}
-    <a href="{{ url_for('products', page=pagination.page - 1) }}">이전</a>
+    <a href="{{ url_for('products', page=pagination.page - 1, q=search_query) }}">이전</a>
   {% endif %}
   <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
   {% if pagination.has_next %}
-    <a href="{{ url_for('products', page=pagination.page + 1) }}">다음</a>
+    <a href="{{ url_for('products', page=pagination.page + 1, q=search_query) }}">다음</a>
   {% endif %}
 </nav>
 {% endblock %}

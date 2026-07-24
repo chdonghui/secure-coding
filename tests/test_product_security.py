@@ -182,6 +182,34 @@ def test_product_catalog_is_public_but_management_requires_login(client):
     assert client.get('/chat').headers['Location'].endswith('/login')
 
 
+def test_product_catalog_search_filters_title_and_description(client):
+    setup_owner(client)
+    create_product(
+        client,
+        title='사과 한 상자',
+        description='신선한 과일 상품',
+    )
+    create_product(
+        client,
+        title='겨울 코트',
+        description='따뜻한 의류 상품',
+    )
+
+    response = client.get('/products?q=사과')
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert '사과 한 상자' in page
+    assert '겨울 코트' not in page
+
+    response = client.get('/products?q=과일')
+    assert '사과 한 상자' in response.get_data(as_text=True)
+
+    response = client.get('/products?q=%25')
+    page = response.get_data(as_text=True)
+    assert '사과 한 상자' not in page
+    assert '겨울 코트' not in page
+
+
 def test_product_state_changes_require_csrf(client):
     setup_owner(client)
 

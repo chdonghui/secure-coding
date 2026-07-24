@@ -7,8 +7,14 @@
   상품 관리 삭제와 사용자 휴면은 서비스 노출과 접근을 즉시 차단합니다.
   신고·대화·감사 기록은 증거 보존을 위해 삭제하지 않습니다.
 </p>
+<nav class="admin-jump-links" aria-label="관리자 섹션 바로가기">
+  <a href="#admin-products">상품 관리</a>
+  <a href="#admin-users">사용자 관리</a>
+  <a href="#admin-reports">신고 검토</a>
+  <a href="#admin-audit">감사 이력</a>
+</nav>
 
-<h3>상품 관리 삭제</h3>
+<h3 id="admin-products">상품 관리 삭제</h3>
 {% if products %}
   <ul>
     {% for product in products %}
@@ -67,7 +73,7 @@
   {% endif %}
 </nav>
 
-<h3>사용자 휴면 관리</h3>
+<h3 id="admin-users">사용자 휴면 관리</h3>
 {% if users %}
   <ul>
     {% for managed_user in users %}
@@ -155,7 +161,7 @@
   {% endif %}
 </nav>
 
-<h3>신고 검토</h3>
+<h3 id="admin-reports">신고 검토</h3>
 {% if reports %}
   <ul>
     {% for report in reports %}
@@ -228,7 +234,7 @@
   {% endif %}
 </nav>
 
-<h3>최근 관리자 감사 이력</h3>
+<h3 id="admin-audit">최근 관리자 감사 이력</h3>
 {% if audit_events %}
   <ul>
     {% for event in audit_events %}

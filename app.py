@@ -65,6 +65,7 @@ ADMIN_RECENT_AUTH_SECONDS = 5 * 60
 PRODUCT_CREATE_RATE_LIMIT = 10
 PRODUCT_CREATE_RATE_WINDOW_SECONDS = 60 * 60
 MAX_PRODUCTS_PER_USER = 100
+PRODUCT_SEARCH_MAX_LENGTH = 100
 TRANSFER_MIN_AMOUNT = 1
 TRANSFER_MAX_AMOUNT = 10_000_000
 WALLET_MAX_BALANCE = 1_000_000_000_000
@@ -2167,6 +2168,10 @@ def normalize_username(value):
     return unicodedata.normalize('NFKC', value.strip())
 
 
+def escape_like_query(value):
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
 def validate_username(username):
     if not USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH:
         return f'사용자명은 {USERNAME_MIN_LENGTH}~{USERNAME_MAX_LENGTH}자여야 합니다.'
@@ -3189,6 +3194,10 @@ def logout():
 def products():
     page = get_page_number()
     db = get_db()
+    search_query = unicodedata.normalize(
+        'NFKC',
+        request.args.get('q', ''),
+    ).strip()[:PRODUCT_SEARCH_MAX_LENGTH]
     product_filter = '''
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
@@ -3210,8 +3219,19 @@ def products():
                 WHERE purchase_order.product_id = product.id
             )
     '''
+    filter_params = []
+    if search_query:
+        search_pattern = f'%{escape_like_query(search_query)}%'
+        product_filter += '''
+            AND (
+                product.title LIKE ? ESCAPE '\\'
+                OR product.description LIKE ? ESCAPE '\\'
+            )
+        '''
+        filter_params.extend((search_pattern, search_pattern))
     total_items = db.execute(
-        f'SELECT COUNT(*) {product_filter}'
+        f'SELECT COUNT(*) {product_filter}',
+        filter_params,
     ).fetchone()[0]
     pagination = build_pagination(total_items, page)
     public_products = db.execute(
@@ -3225,12 +3245,13 @@ def products():
         ORDER BY product.title, product.id
         LIMIT ? OFFSET ?
         ''',
-        (PAGE_SIZE, (page - 1) * PAGE_SIZE),
+        (*filter_params, PAGE_SIZE, (page - 1) * PAGE_SIZE),
     ).fetchall()
     return render_template(
         'products.html',
         products=public_products,
         pagination=pagination,
+        search_query=search_query,
     )
 
 
