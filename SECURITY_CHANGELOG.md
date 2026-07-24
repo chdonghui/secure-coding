@@ -16,6 +16,7 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `1.5` | `2026-07-24` | Socket 인증·메시지 검증·채팅 남용 및 연결 보호 | 자동 테스트 108개 통과 |
 | `1.4` | `2026-07-24` | 신고 시도 제한·실패 감사·개인정보 차단과 DB 백업 검증 | 자동 테스트 88개 통과 |
 | `1.3` | `2026-07-24` | 신고 접수 검증, 남용 방지, 참조 무결성 및 감사 로그 | 자동 테스트 72개 통과 |
 | `1.2` | `2026-07-24` | 상품 등록·수정·삭제, 소유권 및 상품 데이터 무결성 강화 | 자동 테스트 45개 통과 |
@@ -28,6 +29,144 @@
 - ⚠️: 일부 방어만 존재하거나 후속 개선 필요
 - ❌: 해당 버전에서 미적용
 - N/A: 해당 버전에 기능이 없음
+
+---
+
+## Version 1.5
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `1.5` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | Socket 인증, 메시지 검증, 채팅 Rate Limiting, 연결 보호 |
+| 테스트 | 기존 보안 테스트, `tests/test_chat_security.py` |
+| 테스트 결과 | `108 passed` |
+
+### 조치 전후 요약
+
+| 항목 | Version 1.4 | Version 1.5 |
+|---|---|---|
+| Socket 연결 인증 | ❌ 로그인·CSRF 확인 없음 | ✅ 로그인 세션·만료·실사용자·CSRF 확인 |
+| 이벤트 인증 | ❌ 메시지 이벤트에서 미확인 | ✅ 메시지마다 세션 만료와 사용자 존재 재확인 |
+| 발신자 정보 | ❌ 클라이언트 사용자명 신뢰 | ✅ DB 사용자명과 서버 ID·시각 사용 |
+| 메시지 검증 | ❌ 객체·필드·타입·길이 검증 없음 | ✅ 단일 필드, 문자열, NFKC, 1~500자 검증 |
+| 제어문자 | ❌ 제한 없음 | ✅ Unicode `C` 범주 문자 거부 |
+| XSS 출력 | ⚠️ 클라이언트 `textContent`만 적용 | ✅ 서버 필드 제한과 `textContent` 병행 |
+| 사용자 제한 | ❌ 없음 | ✅ 사용자별 10초에 5건 |
+| IP 제한 | ❌ 없음 | ✅ HMAC IP별 1분에 30건 |
+| 반복 스팸 | ❌ 없음 | ✅ 동일 메시지 5초 이내 반복 거부 |
+| Origin | ⚠️ 라이브러리 기본 정책 | ✅ 전달 Host를 배제한 동일 Origin 명시 검증 |
+| 전송 크기 | ❌ 별도 제한 없음 | ✅ Socket.IO Payload 16 KiB 제한 |
+| HTTPS/WSS | ❌ 저장소 강제 설정 없음 | ⚠️ 평문 거부 설정 추가, 실제 TLS는 외부 구성 필요 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드 근거 |
+|---|---|---|---|
+| `V1.5-CHAT-AUTH-01` | 연결 인증 | Socket 연결에서 로그인 세션, 만료 시각, 실제 사용자 확인 | `handle_socket_connect`, `get_authenticated_socket_user` |
+| `V1.5-CHAT-CSRF-01` | Socket CSRF | 연결 인증 데이터의 세션 CSRF Token을 상수 시간 비교 | `socket_csrf_is_valid`, `templates/dashboard.html` |
+| `V1.5-CHAT-AUTH-02` | 이벤트 재인증 | 메시지마다 세션 만료와 DB 사용자 존재 재확인 | `handle_send_message_event` |
+| `V1.5-CHAT-ID-01` | 사칭 방지 | 클라이언트 사용자명을 거부하고 DB 사용자명 사용 | `validate_chat_message`, `handle_send_message_event` |
+| `V1.5-CHAT-INPUT-01` | 형식 검증 | 객체와 `message` 단일 필드·문자열 타입만 허용 | `validate_chat_message` |
+| `V1.5-CHAT-INPUT-02` | 내용 검증 | NFKC 정규화, 공백 제거, 1~500자와 제어문자 차단 | `validate_chat_message` |
+| `V1.5-CHAT-XSS-01` | 출력 인코딩 | 검증된 일반 텍스트를 DOM `textContent`로만 출력 | `templates/dashboard.html` |
+| `V1.5-CHAT-RATE-01` | 사용자 제한 | 사용자별 모든 메시지 시도를 10초에 5건으로 제한 | `consume_chat_rate_limit` |
+| `V1.5-CHAT-RATE-02` | IP 제한 | 원문이 아닌 HMAC IP별 시도를 1분에 30건으로 제한 | `get_client_ip_hash`, `consume_chat_rate_limit` |
+| `V1.5-CHAT-SPAM-01` | 반복 방지 | 동일 사용자의 동일 메시지 5초 이내 반복 차단 | `chat_message_is_duplicate` |
+| `V1.5-CHAT-META-01` | 서버 메타데이터 | 메시지 UUID, DB 사용자명, Unix 시각을 서버에서 생성 | `handle_send_message_event` |
+| `V1.5-SOCKET-ORIGIN-01` | Origin 검증 | 현재 Scheme·Host와 정확히 일치하는 Origin만 허용 | `socket_origin_is_allowed` |
+| `V1.5-SOCKET-SIZE-01` | 전송 크기 | Engine.IO 최대 Payload를 16 KiB로 제한 | `CHAT_MAX_PAYLOAD_BYTES`, `SocketIO` |
+| `V1.5-HTTPS-01` | 평문 연결 거부 | WSGI 경계에서 HTTP와 Socket.IO 평문 handshake를 400으로 거부 | `MARKET_REQUIRE_HTTPS`, `RequireHttpsMiddleware` |
+| `V1.5-PROXY-01` | 프록시 Scheme 신뢰 | 명시한 신뢰 프록시 수만큼만 전달 프로토콜 사용 | `MARKET_TRUSTED_PROXY_COUNT`, `ProxyFix` |
+
+메시지의 HTML 태그 문자열을 서버에서 불완전하게 제거하지 않습니다. 메시지는
+HTML 기능이 아닌 일반 텍스트이며 클라이언트가 `textContent`로 출력해 마크업으로
+해석되지 않도록 합니다. 클라이언트가 보낸 사용자명, 메시지 ID와 시각은
+사용하지 않습니다.
+
+사용자·IP 제한은 인증 후 도착한 유효·무효 메시지 시도를 모두 계산합니다.
+Rate Limiting 시간은 시스템 시각 변경의 영향을 줄이기 위해 단조 시계를
+사용합니다. IP 원문은 저장하지 않고 애플리케이션 비밀키 기반 HMAC으로
+변환합니다.
+
+### 데이터베이스 변경
+
+데이터베이스 스키마 변경은 없습니다. 메시지 본문과 Rate Limiting 상태를 DB에
+저장하지 않습니다.
+
+현재 Rate Limiting 상태는 단일 애플리케이션 프로세스 메모리에만 존재합니다.
+재시작하면 초기화되며, 여러 서버를 운영할 때는 Redis 같은 공용 저장소로
+이전해야 합니다.
+
+### 템플릿·의존성·환경변수 변경
+
+- `templates/dashboard.html`
+  - Socket 연결 CSRF Token 전달
+  - 클라이언트 사용자명 필드 제거
+  - 메시지 `maxlength=500` 보조 제한
+  - 연결·검증·속도 제한 오류를 `textContent`로 표시
+- `tests/test_chat_security.py`: 채팅 보안 전용 테스트 20개
+
+새 Python 의존성은 없습니다.
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `MARKET_REQUIRE_HTTPS` | `false` | 활성화하면 평문 HTTP와 Socket.IO handshake 거부 |
+| `MARKET_TRUSTED_PROXY_COUNT` | `0` | 신뢰할 프록시의 전달 IP·Scheme 홉 수 |
+
+HTTPS 페이지에서 같은 Origin에 연결하는 Socket.IO 클라이언트는 WSS를
+사용합니다. `MARKET_REQUIRE_HTTPS=true`, `MARKET_COOKIE_SECURE=true`와 실제
+TLS 인증서·프록시 구성을 함께 사용해야 합니다. 저장소 테스트만으로 실제 운영
+인증서와 프록시 배포 상태까지 검증하지는 않았습니다.
+
+### 검증 결과
+
+실행 명령:
+
+```sh
+python -m pytest -q
+```
+
+결과:
+
+```text
+108 passed
+```
+
+검증한 주요 시나리오:
+
+- 비로그인 또는 잘못된 Socket CSRF Token 연결 거부
+- 정상 로그인 사용자의 연결과 메시지 전송
+- 메시지 객체·단일 필드·문자열 타입 검증
+- 빈 값·공백·500자 초과·NUL·방향 제어 문자 거부
+- 클라이언트 사용자명 위조 필드 거부
+- 서버 UUID·DB 사용자명·전송 시각 생성
+- XSS 태그 문자열의 일반 텍스트 전송과 `textContent` 출력
+- 사용자·IP별 메시지 속도 제한
+- 동일 메시지 반복 차단
+- 메시지 이벤트에서 만료 세션과 삭제 사용자 재검증
+- 악성 Origin과 전달 Host 위조 거부
+- 16 KiB Socket.IO Payload 제한
+- 선택적 HTTPS 강제와 신뢰하지 않은 전달 Scheme 무시
+- Version 1.1~1.4 전체 보안 회귀 없음
+
+### Version 1.5 이후 남은 보안 항목
+
+- 실제 운영 TLS 인증서, HTTPS/WSS 프록시와 Secure 쿠키 배포 검증
+- 다중 애플리케이션 서버용 공용 채팅 Rate Limiting 저장소
+- Socket 연결 폭주와 동시 연결 수 제한
+- 채팅 차단 이벤트의 민감정보 없는 운영 감사·모니터링 정책
+- Content-Security-Policy 등 HTTP 보안 헤더
+- CDN Socket.IO 스크립트 SRI 또는 자체 호스팅
+- Python 전체 의존성 버전 고정과 정기 취약점 검사
+- IP 단위 로그인 Rate Limiting
+- 신고 관리자 처리 흐름과 감사 로그 보존 정책
+- 기존 Git 이력에 포함됐던 민감 DB 데이터 처리
+
+전체 현재 상태는 `SECURITY_REVIEW.md`에서 관리합니다.
 
 ---
 

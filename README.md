@@ -12,7 +12,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `1.4`
+- 현재 버전: `1.5`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
 - 보안 현황: [SECURITY_REVIEW.md](SECURITY_REVIEW.md)
@@ -209,6 +209,7 @@ export MARKET_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsa
 ```sh
 export MARKET_COOKIE_SECURE=false
 export MARKET_DEBUG=false
+export MARKET_REQUIRE_HTTPS=false
 ```
 
 ngrok HTTPS 주소로 접속할 때:
@@ -216,15 +217,22 @@ ngrok HTTPS 주소로 접속할 때:
 ```sh
 export MARKET_COOKIE_SECURE=true
 export MARKET_DEBUG=false
+export MARKET_REQUIRE_HTTPS=true
+export MARKET_TRUSTED_PROXY_COUNT=1
 ```
 
 `MARKET_DEBUG=true`는 오류 정보가 노출될 수 있으므로 공개 환경에서 사용하면
 안 됩니다.
 
+`MARKET_REQUIRE_HTTPS=true`이면 평문 HTTP 요청과 평문 Socket.IO 연결을
+거부합니다. HTTPS 페이지에서 실행되는 채팅 클라이언트는 같은 Origin의 WSS
+연결을 사용합니다. TLS 인증서와 HTTPS 종료는 ngrok 또는 통제하는 리버스
+프록시에서 제공해야 합니다.
+
 ### 신뢰 프록시 설정
 
-신고 IP 제한은 기본적으로 직접 연결된 클라이언트 주소만 사용하며
-`X-Forwarded-For` 헤더를 신뢰하지 않습니다.
+신고·채팅 IP 제한은 기본적으로 직접 연결된 클라이언트 주소만 사용하며
+전달된 클라이언트 IP와 프로토콜 헤더를 신뢰하지 않습니다.
 
 ```sh
 export MARKET_TRUSTED_PROXY_COUNT=0
@@ -239,6 +247,11 @@ export MARKET_TRUSTED_PROXY_COUNT=1
 
 실제 프록시 수보다 큰 값을 설정하면 공격자가 전달한 IP 헤더를 신뢰할 수
 있습니다. 프록시 구성을 확인할 수 없다면 기본값 `0`을 유지하세요.
+
+채팅은 동일 Origin 연결만 허용하고 연결 시 세션 CSRF Token을 확인합니다.
+메시지는 1~500자이며 브라우저의 `textContent`로 출력됩니다. 기본 전송 제한은
+사용자별 10초에 5건, IP별 1분에 30건이고 동일 메시지는 5초 안에 반복할 수
+없습니다.
 
 ## 6. 애플리케이션 실행
 

@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `1.4` |
+| Current Version | `1.5` |
 | Review Date | `2026-07-24` |
 | Review Type | 정적 코드, 데이터베이스 구조 및 자동 보안 테스트 |
 | Main Application | `app.py` |
@@ -107,7 +107,8 @@
 ### 실시간 채팅
 
 - Socket.IO 연결
-- 수신 메시지 전체 브로드캐스트
+- 인증·CSRF 검증을 통과한 사용자의 검증된 메시지 전체 브로드캐스트
+- 사용자·IP 전송 제한과 동일 메시지 반복 방지
 
 ### 신고
 
@@ -277,30 +278,50 @@
 
 #### 인증과 메시지 검증
 
-- [ ] Socket 연결 시 로그인 세션을 확인한다.
-- [ ] 메시지 이벤트 처리 시 로그인 세션을 다시 확인한다.
-- [ ] 사용자명은 클라이언트가 아닌 인증된 세션과 DB에서 가져온다.
-- [ ] 수신 데이터가 객체인지 확인한다.
-- [ ] 필수 메시지 필드와 데이터 타입을 검증한다.
-- [ ] 메시지의 최소·최대 길이를 검증한다.
-- [ ] 허용되지 않은 제어 문자와 비정상 데이터를 거부한다.
+- [x] Socket 연결 시 로그인 세션과 세션 CSRF Token을 확인한다.
+- [x] 메시지 이벤트 처리 시 세션 만료와 실제 사용자를 다시 확인한다.
+- [x] 사용자명은 클라이언트가 아닌 인증된 세션과 DB에서 가져온다.
+- [x] 수신 데이터가 객체인지 확인한다.
+- [x] `message` 외의 클라이언트 필드를 거부하고 문자열 타입을 확인한다.
+- [x] 메시지를 NFKC 정규화하고 1~500자로 제한한다.
+- [x] Unicode 제어·서식 문자 등 `C` 범주 문자를 거부한다.
 - [x] 현재 웹 클라이언트는 메시지를 `textContent`로 출력한다.
-- [ ] 서버가 검증된 필드만 포함하는 새 메시지 객체를 생성해 전송한다.
+- [x] 서버가 메시지 ID, 사용자명, 메시지, 전송 시각만 포함한 객체를 생성한다.
 
 현재 근거:
 
-- 인증·검증 없는 브로드캐스트: `app.py:202-206`
-- 클라이언트가 사용자명 지정: `templates/dashboard.html:39`
-- `textContent` 출력: `templates/dashboard.html:28-32`
+- 연결·이벤트 인증: `app.py`의 `handle_socket_connect`,
+  `get_authenticated_socket_user`, `socket_csrf_is_valid`
+- 메시지 검증·서버 객체 생성: `app.py`의 `validate_chat_message`,
+  `handle_send_message_event`
+- 안전한 출력과 서버 발신자 사용: `templates/dashboard.html`
+- 공격성 요청과 인증 회귀 테스트: `tests/test_chat_security.py`
 
 #### Rate Limiting 및 연결 보안
 
-- [ ] 사용자별 메시지 전송 속도를 제한한다.
-- [ ] 연결 또는 IP별 Socket 이벤트 속도를 제한한다.
-- [ ] 반복 메시지와 자동화된 스팸을 제한한다.
+- [x] 사용자별 메시지를 10초에 5건으로 제한한다.
+- [x] HMAC 처리된 IP별 메시지를 1분에 30건으로 제한한다.
+- [x] 동일 사용자의 동일 메시지 5초 이내 반복을 제한한다.
 - [ ] 운영 환경에서 HTTPS와 WSS를 사용한다.
-- [ ] 허용된 Origin만 Socket 연결을 사용할 수 있도록 제한한다.
-- [ ] 메시지 및 요청 크기의 상한을 설정한다.
+- [x] `MARKET_REQUIRE_HTTPS=true`일 때 평문 HTTP·Socket 연결을 거부한다.
+- [x] 요청 Host와 Scheme이 일치하는 동일 Origin Socket 연결만 허용한다.
+- [x] Socket.IO 전송 크기를 16 KiB로 제한한다.
+
+현재 근거:
+
+- 사용자·IP·반복 제한: `app.py`의 `consume_chat_rate_limit`,
+  `chat_message_is_duplicate`
+- 동일 Origin과 크기 제한: `app.py`의 `socket_origin_is_allowed`,
+  `SocketIO` 초기화
+- 선택적 HTTPS/WSS 강제: `app.py`의 `RequireHttpsMiddleware`,
+  `MARKET_REQUIRE_HTTPS`
+- 제한·Origin·HTTPS 테스트: `tests/test_chat_security.py`
+
+현재 제한:
+
+- Rate Limiting 상태는 단일 프로세스 메모리에 있으므로 재시작 시 초기화된다.
+- 다중 서버에서는 Redis 같은 공용 저장소가 필요하다.
+- 실제 운영 TLS 인증서와 프록시 배포는 저장소만으로 검증할 수 없다.
 
 ### 4. 신고 및 안전 거래
 
@@ -369,7 +390,8 @@
 
 #### HTTP 보안
 
-- [ ] 운영 환경에서 HTTPS를 강제한다.
+- [x] 환경변수로 애플리케이션의 평문 HTTP·Socket 요청을 거부할 수 있다.
+- [ ] 운영 환경에서 TLS 인증서와 HTTPS/WSS 강제를 검증한다.
 - [ ] HSTS를 적용한다.
 - [ ] Content-Security-Policy를 적용한다.
 - [ ] `X-Frame-Options` 또는 CSP `frame-ancestors`를 적용한다.
@@ -406,8 +428,8 @@
 ### P1 — 높은 우선순위
 
 - [x] 신고의 서버측 입력 검증
-- [ ] Socket 연결 인증, 이벤트 인증 및 사용자 사칭 방지
-- [ ] 채팅 Rate Limiting과 메시지 크기 제한
+- [x] Socket 연결 인증, 이벤트 인증 및 사용자 사칭 방지
+- [x] 채팅 Rate Limiting과 메시지 크기 제한
 - [ ] HTTPS/WSS와 Secure 세션 쿠키 적용
 - [x] 세션 만료와 로그인 실패 제한 적용
 - [x] 신고 테이블의 외래키와 참조 무결성 적용
@@ -454,6 +476,7 @@
 
 | Version | Date | 변경 내용 |
 |---|---|---|
+| `1.5` | `2026-07-24` | Socket 세션·CSRF 인증, 메시지 검증, 서버 발신자 생성, 사용자·IP Rate Limiting, 반복 스팸·Origin·전송 크기 제한과 선택적 HTTPS/WSS 강제 적용. 전체 자동 테스트 108개 통과 |
 | `1.4` | `2026-07-24` | IP·사용자별 신고 시도 제한, 실패 감사 로그, 개인정보 입력 차단, 안전한 DB 백업·검증·복구 도구 및 감사 스키마 마이그레이션 적용. 전체 자동 테스트 88개 통과 |
 | `1.3` | `2026-07-24` | 신고 CSRF·입력·대상 검증, 자기·중복 신고 차단, 시간당 5건 제한, 외래키와 추가 전용 감사 로그, 기존 DB 마이그레이션 적용. 전체 자동 테스트 72개 통과 |
 | `1.2` | `2026-07-24` | 상품 등록·수정·삭제 입력 검증, CSRF, 소유권 확인, 저장형 XSS 방어, 가격 `INTEGER`와 외래키 마이그레이션 적용. 전체 자동 테스트 45개 통과 |

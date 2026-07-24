@@ -5,16 +5,18 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import unicodedata
 import uuid
+from collections import deque
 from datetime import timedelta
 from functools import wraps
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
-from flask_socketio import SocketIO, send
+from flask_socketio import SocketIO, disconnect, emit, send
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
@@ -36,6 +38,14 @@ REPORT_RATE_WINDOW_SECONDS = 60 * 60
 MAX_REPORT_ATTEMPTS_PER_USER = 10
 MAX_REPORT_ATTEMPTS_PER_IP = 20
 REPORT_ATTEMPT_WINDOW_SECONDS = 60 * 60
+CHAT_MESSAGE_MIN_LENGTH = 1
+CHAT_MESSAGE_MAX_LENGTH = 500
+CHAT_MAX_PAYLOAD_BYTES = 16 * 1024
+CHAT_USER_RATE_LIMIT = 5
+CHAT_USER_RATE_WINDOW_SECONDS = 10
+CHAT_IP_RATE_LIMIT = 30
+CHAT_IP_RATE_WINDOW_SECONDS = 60
+CHAT_DUPLICATE_WINDOW_SECONDS = 5
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
 SESSION_IDLE_SECONDS = 30 * 60
@@ -94,6 +104,44 @@ def get_integer_env(name, default, minimum=0, maximum=5):
     return parsed_value
 
 
+def socket_origin_is_allowed(origin, environ):
+    if origin is None:
+        return True
+    if not isinstance(origin, str):
+        return False
+    scheme = environ.get('wsgi.url_scheme')
+    host = environ.get('HTTP_HOST')
+    if scheme not in {'http', 'https'} or not host:
+        return False
+    expected_origin = f'{scheme}://{host}'
+    return hmac.compare_digest(
+        origin.rstrip('/'),
+        expected_origin.rstrip('/'),
+    )
+
+
+class RequireHttpsMiddleware:
+    def __init__(self, wsgi_app, config):
+        self.wsgi_app = wsgi_app
+        self.config = config
+
+    def __call__(self, environ, start_response):
+        if (
+            self.config['REQUIRE_HTTPS']
+            and environ.get('wsgi.url_scheme') != 'https'
+        ):
+            response_body = b'Bad Request'
+            start_response(
+                '400 Bad Request',
+                [
+                    ('Content-Type', 'text/plain; charset=utf-8'),
+                    ('Content-Length', str(len(response_body))),
+                ],
+            )
+            return [response_body]
+        return self.wsgi_app(environ, start_response)
+
+
 app = Flask(__name__)
 trusted_proxy_count = get_integer_env('MARKET_TRUSTED_PROXY_COUNT', 0)
 app.config.update(
@@ -104,16 +152,32 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     SESSION_COOKIE_SECURE=get_boolean_env('MARKET_COOKIE_SECURE', True),
+    REQUIRE_HTTPS=get_boolean_env('MARKET_REQUIRE_HTTPS', False),
     TRUSTED_PROXY_COUNT=trusted_proxy_count,
 )
-if trusted_proxy_count:
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxy_count)
 DATABASE = 'market.db'
-socketio = SocketIO(app)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=socket_origin_is_allowed,
+    max_http_buffer_size=CHAT_MAX_PAYLOAD_BYTES,
+)
+app.wsgi_app = RequireHttpsMiddleware(app.wsgi_app, app.config)
+if trusted_proxy_count:
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=trusted_proxy_count,
+        x_proto=trusted_proxy_count,
+    )
 password_hasher = PasswordHasher()
 DUMMY_PASSWORD_HASH = password_hasher.hash(
     'This password is used only to equalize failed-login verification time.'
 )
+chat_rate_limit_lock = threading.Lock()
+chat_rate_limit_state = {
+    'user': {},
+    'ip': {},
+}
+chat_duplicate_state = {}
 
 
 # 데이터베이스 연결 관리: 요청마다 연결 생성 후 사용, 종료 시 close
@@ -1053,6 +1117,17 @@ def record_failed_login(cursor, user, now):
     )
 
 
+def session_timestamps_are_valid(now):
+    authenticated_at = session.get('authenticated_at')
+    last_activity = session.get('last_activity')
+    return (
+        isinstance(authenticated_at, int)
+        and isinstance(last_activity, int)
+        and 0 <= now - authenticated_at <= SESSION_ABSOLUTE_SECONDS
+        and 0 <= now - last_activity <= SESSION_IDLE_SECONDS
+    )
+
+
 @app.before_request
 def load_and_validate_session():
     g.current_user = None
@@ -1061,15 +1136,7 @@ def load_and_validate_session():
         return None
 
     now = int(time.time())
-    authenticated_at = session.get('authenticated_at')
-    last_activity = session.get('last_activity')
-    session_expired = (
-        not isinstance(authenticated_at, int)
-        or not isinstance(last_activity, int)
-        or now - authenticated_at > SESSION_ABSOLUTE_SECONDS
-        or now - last_activity > SESSION_IDLE_SECONDS
-    )
-    if session_expired:
+    if not session_timestamps_are_valid(now):
         session.clear()
         flash('세션이 만료되었습니다. 다시 로그인해주세요.')
         return redirect(url_for('login'))
@@ -1594,11 +1661,172 @@ def report_post():
     flash('신고가 접수되었습니다.')
     return redirect(url_for('dashboard'))
 
-# 실시간 채팅: 클라이언트가 메시지를 보내면 전체 브로드캐스트
+def get_authenticated_socket_user():
+    user_id = session.get('user_id')
+    now = int(time.time())
+    if user_id is None or not session_timestamps_are_valid(now):
+        session.clear()
+        return None
+
+    user = get_db().execute(
+        'SELECT id, username FROM user WHERE id = ?',
+        (user_id,),
+    ).fetchone()
+    if user is None:
+        session.clear()
+        return None
+
+    session['last_activity'] = now
+    return user
+
+
+def socket_csrf_is_valid(auth):
+    expected_token = session.get(CSRF_SESSION_KEY, '')
+    submitted_token = (
+        auth.get('csrf_token', '')
+        if isinstance(auth, dict)
+        else ''
+    )
+    return (
+        isinstance(submitted_token, str)
+        and expected_token
+        and submitted_token
+        and hmac.compare_digest(expected_token, submitted_token)
+    )
+
+
+def validate_chat_message(data):
+    if not isinstance(data, dict) or set(data) != {'message'}:
+        return None
+    raw_message = data.get('message')
+    if not isinstance(raw_message, str):
+        return None
+
+    message = unicodedata.normalize('NFKC', raw_message.strip())
+    if not CHAT_MESSAGE_MIN_LENGTH <= len(message) <= CHAT_MESSAGE_MAX_LENGTH:
+        return None
+    if any(
+        unicodedata.category(character).startswith('C')
+        for character in message
+    ):
+        return None
+    return message
+
+
+def prune_chat_rate_limit_state(now):
+    windows = {
+        'user': CHAT_USER_RATE_WINDOW_SECONDS,
+        'ip': CHAT_IP_RATE_WINDOW_SECONDS,
+    }
+    for scope_type, entries in chat_rate_limit_state.items():
+        cutoff = now - windows[scope_type]
+        for scope_key, timestamps in list(entries.items()):
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+            if not timestamps:
+                entries.pop(scope_key, None)
+
+    duplicate_cutoff = now - CHAT_DUPLICATE_WINDOW_SECONDS
+    for user_id, (_, sent_at) in list(chat_duplicate_state.items()):
+        if sent_at <= duplicate_cutoff:
+            chat_duplicate_state.pop(user_id, None)
+
+
+def consume_chat_rate_limit(user_id, source_ip_hash, now):
+    with chat_rate_limit_lock:
+        prune_chat_rate_limit_state(now)
+        user_timestamps = chat_rate_limit_state['user'].setdefault(
+            user_id,
+            deque(),
+        )
+        ip_timestamps = chat_rate_limit_state['ip'].setdefault(
+            source_ip_hash,
+            deque(),
+        )
+        if (
+            len(user_timestamps) >= CHAT_USER_RATE_LIMIT
+            or len(ip_timestamps) >= CHAT_IP_RATE_LIMIT
+        ):
+            return False
+        user_timestamps.append(now)
+        ip_timestamps.append(now)
+        return True
+
+
+def chat_message_is_duplicate(user_id, message, now):
+    with chat_rate_limit_lock:
+        previous_message = chat_duplicate_state.get(user_id)
+        if (
+            previous_message is not None
+            and previous_message[0] == message
+            and now - previous_message[1] < CHAT_DUPLICATE_WINDOW_SECONDS
+        ):
+            return True
+        chat_duplicate_state[user_id] = (message, now)
+        return False
+
+
+def reject_chat_event(code, message, should_disconnect=False):
+    emit('chat_error', {'code': code, 'message': message})
+    if should_disconnect:
+        disconnect()
+    return {'ok': False, 'error': code}
+
+
+@socketio.on('connect')
+def handle_socket_connect(auth=None):
+    if not socket_csrf_is_valid(auth):
+        return False
+    return get_authenticated_socket_user() is not None
+
+
 @socketio.on('send_message')
 def handle_send_message_event(data):
-    data['message_id'] = str(uuid.uuid4())
-    send(data, broadcast=True)
+    user = get_authenticated_socket_user()
+    if user is None:
+        return reject_chat_event(
+            'authentication_required',
+            '로그인이 필요합니다.',
+            should_disconnect=True,
+        )
+
+    now = int(time.time())
+    rate_limit_time = time.monotonic()
+    source_ip_hash = get_client_ip_hash()
+    if not consume_chat_rate_limit(
+        user['id'],
+        source_ip_hash,
+        rate_limit_time,
+    ):
+        return reject_chat_event(
+            'rate_limited',
+            '메시지를 너무 빠르게 보내고 있습니다.',
+        )
+
+    message = validate_chat_message(data)
+    if message is None:
+        return reject_chat_event(
+            'invalid_message',
+            '메시지 형식을 확인해주세요.',
+        )
+    if chat_message_is_duplicate(
+        user['id'],
+        message,
+        rate_limit_time,
+    ):
+        return reject_chat_event(
+            'duplicate_message',
+            '같은 메시지를 연속으로 보낼 수 없습니다.',
+        )
+
+    outbound_message = {
+        'message_id': str(uuid.uuid4()),
+        'username': user['username'],
+        'message': message,
+        'sent_at': now,
+    }
+    send(outbound_message, broadcast=True)
+    return {'ok': True, 'message_id': outbound_message['message_id']}
 
 
 @app.errorhandler(400)
