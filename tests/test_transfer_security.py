@@ -280,6 +280,58 @@ def test_regular_users_can_transfer_in_both_directions(transfer_database):
     assert fetch_transfer_count() == 2
 
 
+def test_admin_cannot_be_a_transfer_participant_at_database_boundary(
+    transfer_database,
+):
+    connection = sqlite3.connect(market.DATABASE)
+    connection.execute('PRAGMA foreign_keys = ON')
+    try:
+        connection.execute(
+            '''
+            INSERT INTO wallet_adjustment (
+                id,
+                user_id,
+                amount,
+                source_type,
+                created_at
+            )
+            VALUES (?, ?, 100, 'quickstart_demo_credit', ?)
+            ''',
+            (str(uuid.uuid4()), ADMIN_ID, int(time.time())),
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match='invalid transfer participant',
+        ):
+            connection.execute(
+                '''
+                INSERT INTO money_transfer (
+                    id,
+                    request_id,
+                    sender_id,
+                    recipient_id,
+                    amount,
+                    memo,
+                    sender_username_snapshot,
+                    recipient_username_snapshot,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, 1, '', ?, ?, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    str(uuid.uuid4()),
+                    SENDER_ID,
+                    ADMIN_ID,
+                    SENDER_USERNAME,
+                    ADMIN_USERNAME,
+                    int(time.time()),
+                ),
+            )
+    finally:
+        connection.close()
+
+
 def test_transfer_requires_csrf_and_current_password(transfer_database):
     client, token = authenticated_client()
     response = send_transfer(client, token, include_csrf=False)

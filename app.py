@@ -560,6 +560,7 @@ def ensure_transfer_schema(cursor):
             SELECT RAISE(ABORT, 'wallet adjustment is append-only');
         END
     """)
+    cursor.execute('DROP TRIGGER IF EXISTS validate_money_transfer_participants')
     cursor.execute(f"""
         CREATE TRIGGER IF NOT EXISTS validate_money_transfer_participants
         BEFORE INSERT ON money_transfer
@@ -569,6 +570,7 @@ def ensure_transfer_schema(cursor):
                 FROM user
                 WHERE
                     user.id = NEW.sender_id
+                    AND user.is_admin = 0
                     AND user.username = NEW.sender_username_snapshot
                     AND user.deleted_at IS NULL
                     AND NOT EXISTS (
@@ -582,6 +584,7 @@ def ensure_transfer_schema(cursor):
                 FROM user
                 WHERE
                     user.id = NEW.recipient_id
+                    AND user.is_admin = 0
                     AND user.username = NEW.recipient_username_snapshot
                     AND user.deleted_at IS NULL
                     AND NOT EXISTS (
@@ -3172,6 +3175,7 @@ def transfers():
         FROM user
         WHERE
             id <> ?
+            AND is_admin = 0
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3257,6 +3261,7 @@ def create_transfer():
         WHERE
             username = ?
             AND id <> ?
+            AND is_admin = 0
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3306,6 +3311,7 @@ def create_transfer():
             WHERE
                 id = ?
                 AND username = ?
+                AND is_admin = 0
                 AND deleted_at IS NULL
                 AND NOT EXISTS (
                     SELECT 1
