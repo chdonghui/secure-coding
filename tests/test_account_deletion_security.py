@@ -231,6 +231,27 @@ def test_account_deletion_rejects_failed_reauthentication_or_confirmation(
     assert member['session_version'] == 0
 
 
+def test_administrator_must_revoke_role_before_account_deletion(
+    account_deletion_database,
+):
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        connection.execute(
+            'UPDATE user SET is_admin = 1 WHERE id = ?',
+            (MEMBER_ID,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    client = authenticated_client()
+
+    response = delete_account(client)
+
+    assert response.status_code == 302
+    assert response.headers['Location'].endswith('/profile')
+    assert fetch_member()['deleted_at'] is None
+
+
 def test_account_deletion_anonymizes_account_and_preserves_references(
     account_deletion_database,
 ):

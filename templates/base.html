@@ -4,8 +4,13 @@
   <meta charset="UTF-8">
   <title>{% block title %}My Market{% endblock %}</title>
   <!-- Socket.IO 클라이언트 라이브러리 -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-  <style>
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"
+    integrity="sha384-ZCmVL/dTQHh41JxtZe73klDRFSJ/zixGCGt5lhnLQGjSWfAnlXSg+GSnRACaK5lc"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+  <style nonce="{{ csp_nonce() }}">
     /* Notion 스타일 미니멀 디자인 */
     body {
       background-color: #F7F7F7;

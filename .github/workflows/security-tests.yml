@@ -1,0 +1,31 @@
+name: Security tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Verify dependency graph
+        run: python -m pip check
+      - name: Audit known vulnerabilities
+        run: python -m pip_audit --require-hashes -r requirements.lock
+      - name: Run security tests
+        env:
+          MARKET_SECRET_KEY: ci-only-placeholder-secret-key-over-32-characters
+          MARKET_COOKIE_SECURE: "false"
+        run: python -m pytest -q

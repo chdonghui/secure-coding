@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import time
 
@@ -109,9 +110,11 @@ def test_duplicate_registration_does_not_reveal_or_replace_account(client):
     [
         ('ab', VALID_PASSWORD),
         ('invalid<script', VALID_PASSWORD),
+        ('한글사용자', VALID_PASSWORD),
         ('valid_user', 'short1'),
         ('valid_user', '123456789012'),
         ('valid_user', 'abcdefghijkl'),
+        ('valid_user', 'Password1234'),
         ('valid_user', 'Invalid Password123'),
     ],
 )
@@ -373,7 +376,7 @@ def test_session_has_idle_and_absolute_expiration(
         assert 'user_id' not in current_session
 
 
-def test_account_is_temporarily_locked_after_repeated_failures(client):
+def test_correct_password_recovers_temporarily_locked_account(client):
     register_user(client)
     for _ in range(market.MAX_FAILED_LOGIN_ATTEMPTS):
         response = login_user(client, password='WrongPassword123!')
@@ -383,24 +386,135 @@ def test_account_is_temporarily_locked_after_repeated_failures(client):
     assert locked_user['failed_login_attempts'] == 0
     assert locked_user['locked_until'] > int(time.time())
 
-    login_user(client)
-    with client.session_transaction() as current_session:
-        assert 'user_id' not in current_session
-
-    connection = sqlite3.connect(market.DATABASE)
-    try:
-        connection.execute(
-            'UPDATE user SET locked_until = ? WHERE username = ?',
-            (int(time.time()) - 1, VALID_USERNAME),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
     response = login_user(client)
     assert response.headers['Location'].endswith('/dashboard')
     with client.session_transaction() as current_session:
         assert current_session['user_id'] == fetch_user()['id']
+    recovered_user = fetch_user()
+    assert recovered_user['failed_login_attempts'] == 0
+    assert recovered_user['locked_until'] is None
+
+
+def test_registration_and_login_attempts_are_rate_limited_by_ip(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(market, 'REGISTER_IP_RATE_LIMIT', 2)
+    assert register_user(client, 'first_user').status_code == 302
+    assert register_user(client, 'second_user').status_code == 302
+    assert register_user(client, 'third_user').status_code == 429
+
+    monkeypatch.setattr(market, 'LOGIN_IP_RATE_LIMIT', 2)
+    for _ in range(2):
+        assert login_user(
+            client,
+            username='unknown_user',
+            password='WrongPassword123!',
+        ).status_code == 302
+    assert login_user(
+        client,
+        username='unknown_user',
+        password='WrongPassword123!',
+    ).status_code == 429
+
+
+def test_successful_login_does_not_reset_ip_attempt_limit(
+    client,
+    monkeypatch,
+):
+    register_user(client)
+    monkeypatch.setattr(market, 'LOGIN_IP_RATE_LIMIT', 3)
+
+    assert login_user(
+        client,
+        username='unknown_user',
+        password='WrongPassword123!',
+    ).status_code == 302
+    assert login_user(client).headers['Location'].endswith('/dashboard')
+    assert login_user(
+        client,
+        username='unknown_user',
+        password='WrongPassword123!',
+    ).status_code == 302
+    assert login_user(
+        client,
+        username='unknown_user',
+        password='WrongPassword123!',
+    ).status_code == 429
+
+
+def test_sensitive_reauthentication_is_rate_limited(client, monkeypatch):
+    register_user(client)
+    login_user(client)
+    monkeypatch.setattr(market, 'REAUTH_RATE_LIMIT', 2)
+
+    for _ in range(2):
+        token = get_csrf_token(client, '/profile')
+        response = client.post(
+            '/profile',
+            data={
+                'csrf_token': token,
+                'bio': '변경되면 안 되는 소개글',
+                'current_password': 'WrongPassword123!',
+            },
+        )
+        assert response.status_code == 302
+
+    token = get_csrf_token(client, '/profile')
+    response = client.post(
+        '/profile',
+        data={
+            'csrf_token': token,
+            'bio': '제한 후 소개글',
+            'current_password': 'WrongPassword123!',
+        },
+    )
+    assert response.status_code == 429
+    assert fetch_user()['bio'] is None
+
+
+def test_security_headers_trusted_host_and_database_permissions(client):
+    response = client.get('/products')
+    csp = response.headers['Content-Security-Policy']
+    nonce_match = re.search(r"script-src[^;]*'nonce-([^']+)'", csp)
+
+    assert nonce_match is not None
+    assert f'nonce="{nonce_match.group(1)}"' in response.get_data(as_text=True)
+    assert "frame-ancestors 'none'" in csp
+    assert response.headers['X-Frame-Options'] == 'DENY'
+    assert response.headers['X-Content-Type-Options'] == 'nosniff'
+    assert response.headers['Referrer-Policy'] == (
+        'strict-origin-when-cross-origin'
+    )
+    assert response.headers['Permissions-Policy'] == (
+        'camera=(), microphone=(), geolocation=()'
+    )
+    assert response.headers['Cache-Control'] == 'no-store, max-age=0'
+    assert 'sha384-ZCmVL/dTQHh41JxtZe73klDRFSJ/' in response.get_data(
+        as_text=True
+    )
+
+    secure_response = client.get('/products', base_url='https://localhost')
+    assert secure_response.headers['Strict-Transport-Security'] == (
+        'max-age=31536000; includeSubDomains'
+    )
+    assert client.get(
+        '/products',
+        base_url='http://attacker.example',
+    ).status_code == 400
+    assert os.stat(market.DATABASE).st_mode & 0o777 == 0o600
+
+
+def test_trusted_host_environment_validation(monkeypatch):
+    monkeypatch.setenv(
+        'MARKET_TRUSTED_HOSTS',
+        'market.example, localhost',
+    )
+    assert market.get_trusted_hosts() == ['market.example', 'localhost']
+
+    monkeypatch.setenv('MARKET_TRUSTED_HOSTS', 'https://market.example/path')
+    with pytest.raises(RuntimeError):
+        market.get_trusted_hosts()
 
 
 def test_legacy_database_passwords_and_columns_are_migrated(tmp_path, monkeypatch):

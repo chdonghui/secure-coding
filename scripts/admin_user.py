@@ -1,7 +1,14 @@
 import argparse
+import getpass
 import sqlite3
 import sys
+import time
+import unicodedata
+import uuid
 from pathlib import Path
+
+
+DEFAULT_ROLE_CHANGE_REASON = '로컬 관리자 역할 변경 요청을 처리했습니다.'
 
 
 def open_database(database_path):
@@ -18,7 +25,20 @@ def open_database(database_path):
     if 'is_admin' not in columns:
         connection.close()
         raise ValueError(
-            '관리자 스키마가 없습니다. 먼저 Version 3.0 애플리케이션을 실행하세요.'
+            '관리자 스키마가 없습니다. 먼저 Version 3.1 애플리케이션을 실행하세요.'
+        )
+    role_audit_table = connection.execute(
+        '''
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'admin_role_audit'
+        '''
+    ).fetchone()
+    if role_audit_table is None:
+        connection.close()
+        raise ValueError(
+            '관리자 역할 감사 스키마가 없습니다. '
+            '먼저 Version 3.1 애플리케이션을 실행하세요.'
         )
     return connection
 
@@ -38,7 +58,26 @@ def list_admins(connection):
     ).fetchall()
 
 
-def set_admin_role(connection, username, grant):
+def set_admin_role(
+    connection,
+    username,
+    grant,
+    operator_name=None,
+    reason=DEFAULT_ROLE_CHANGE_REASON,
+):
+    operator_name = (operator_name or getpass.getuser()).strip()
+    reason = unicodedata.normalize('NFKC', reason.strip())
+    if not 1 <= len(operator_name) <= 100 or any(
+        unicodedata.category(character).startswith('C')
+        for character in operator_name
+    ):
+        raise ValueError('운영자 식별자는 1~100자의 일반 문자여야 합니다.')
+    if not 10 <= len(reason) <= 500 or any(
+        unicodedata.category(character).startswith('C')
+        and character not in {'\n', '\t'}
+        for character in reason
+    ):
+        raise ValueError('역할 변경 사유는 10~500자의 일반 문자여야 합니다.')
     user = connection.execute(
         '''
         SELECT
@@ -59,12 +98,46 @@ def set_admin_role(connection, username, grant):
         raise ValueError('휴면 사용자는 관리자로 지정할 수 없습니다.')
     if not grant and user['is_admin'] == 1 and len(list_admins(connection)) <= 1:
         raise ValueError('마지막 활성 관리자의 권한은 해제할 수 없습니다.')
+    requested_role = 1 if grant else 0
+    if user['is_admin'] == requested_role:
+        raise ValueError('사용자가 이미 요청한 관리자 역할 상태입니다.')
 
-    connection.execute(
-        'UPDATE user SET is_admin = ? WHERE id = ?',
-        (1 if grant else 0, user['id']),
-    )
-    connection.commit()
+    try:
+        connection.execute(
+            '''
+            UPDATE user
+            SET is_admin = ?, session_version = session_version + 1
+            WHERE id = ?
+            ''',
+            (requested_role, user['id']),
+        )
+        connection.execute(
+            '''
+            INSERT INTO admin_role_audit (
+                id,
+                operator_name,
+                target_user_id,
+                target_username_snapshot,
+                action_type,
+                reason,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()),
+                operator_name,
+                user['id'],
+                user['username'],
+                'admin_granted' if grant else 'admin_revoked',
+                reason,
+                int(time.time()),
+            ),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
     return user
 
 
@@ -78,6 +151,8 @@ def parse_args():
     for command in ('grant', 'revoke'):
         role_parser = subparsers.add_parser(command)
         role_parser.add_argument('--username', required=True)
+        role_parser.add_argument('--reason', required=True)
+        role_parser.add_argument('--operator')
     return parser.parse_args()
 
 
@@ -94,6 +169,8 @@ def main():
                 connection,
                 args.username,
                 grant=args.command == 'grant',
+                operator_name=args.operator,
+                reason=args.reason,
             )
         finally:
             connection.close()

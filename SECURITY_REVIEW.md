@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| Current Version | `3.0` |
+| Current Version | `3.1` |
 | Review Date | `2026-07-24` |
 | Review Type | 정적 코드, 데이터베이스 구조 및 자동 보안 테스트 |
 | Main Application | `app.py` |
@@ -99,6 +99,7 @@
 - 현재 비밀번호 재인증 후 소개글 수정
 - 현재 비밀번호 재인증 후 비밀번호 변경
 - 현재 비밀번호 재인증 후 계정 탈퇴와 세션 종료
+- 가입·로그인·민감 작업의 사용자·IP 남용 제한
 
 ### 상품
 
@@ -107,21 +108,24 @@
 - 상품 상세 조회
 - 로그인한 사용자의 등록 상품 관리 목록
 - 상품 소유자의 상품 수정 및 삭제
+- 등록 속도·총량 제한과 페이지 단위 목록 조회
 
 ### 실시간 채팅
 
 - Socket.IO 연결
 - 인증·CSRF 검증을 통과한 사용자의 검증된 메시지 전체 브로드캐스트
-- 사용자 선택과 최근 100건 기록을 제공하는 실시간 1대1 채팅
+- 페이지 단위 사용자 선택과 대화 기록을 제공하는 실시간 1대1 채팅
 - 발신자·수신자만 접근할 수 있는 1대1 메시지 저장과 조회
+- 1대1 채팅 사용자 차단·해제
 - 사용자·IP 전송 제한과 동일 메시지 반복 방지
+- Socket 연결 시도와 사용자별 동시 연결 제한
 
 ### 신고
 
 - 로그인 사용자의 사용자·상품 신고 접수
 - 신고 대상·사유 검증, 중복·횟수 제한 및 접수 감사 로그
 - 사용자·IP별 시도 제한, 실패 감사 로그 및 개인정보 입력 차단
-- 관리자 검토 및 신고 상태 관리는 아직 구현되지 않음
+- 관리자 신고 사유 조회와 완료·기각 검토 상태·처리 감사
 - 별도의 안전 거래 기능은 아직 구현되지 않음
 
 ### 관리자 제재
@@ -129,7 +133,9 @@
 - 명시적으로 역할을 부여한 관리자 전용 제재 화면
 - 신고 수를 참고한 불량 상품 관리 삭제와 공개 비노출
 - 일반 사용자 휴면·해제와 기존 HTTP·Socket 세션 차단
-- 제재 사유와 처리자·대상·시각을 보존하는 추가 전용 감사 로그
+- 최근 인증·속도 제한을 적용한 제재 상태 변경
+- 제재 당시 표시값과 처리자·대상·사유·시각을 보존하는 추가 전용 감사 로그
+- 관리자 역할 변경 세션 무효화와 추가 전용 역할 감사
 - 관리자 자신·다른 관리자 휴면 차단
 
 ## 보안 체크리스트
@@ -149,9 +155,10 @@
 
 현재 근거:
 
-- 입력 정규화 및 검증: `app.py:147-176`, `app.py:291-296`, `app.py:414-419`
+- 입력 정규화 및 검증: `normalize_username`, `validate_username`,
+  `validate_password`, `validate_bio`
 - 비밀번호 변경 검증: `app.py`의 `update_password`, `validate_password`
-- JavaScript 문맥의 `tojson` 인코딩: `templates/dashboard.html:39`
+- JavaScript 문맥의 `tojson` 인코딩: `templates/dashboard.html`
 
 #### CSRF 보호
 
@@ -166,11 +173,12 @@
 
 현재 근거:
 
-- 토큰 생성·상수 시간 비교: `app.py:179-203`
-- 회원 Form 토큰: `templates/register.html:6`, `templates/login.html:6`, `templates/profile.html:7`
+- 토큰 생성·상수 시간 비교: `generate_csrf_token`, `csrf_protected`
+- 회원 Form 토큰: `templates/register.html`, `templates/login.html`,
+  `templates/profile.html`
 - 마이페이지 Form 토큰: `templates/profile.html`, `app.py`의
   `profile_post`, `update_password`, `delete_account`
-- POST 로그아웃과 토큰: `app.py:384-390`, `templates/base.html:106-109`
+- POST 로그아웃과 토큰: `logout`, `templates/base.html`
 - 상품 Form 토큰: `templates/new_product.html`, `templates/edit_product.html`,
   `templates/view_product.html`
 - 상품 POST 검증: `app.py`의 `new_product_post`, `edit_product_post`,
@@ -189,9 +197,10 @@
 
 현재 근거:
 
-- Argon2 해시 생성 및 검증: `app.py:62-65`, `app.py:206-210`, `app.py:305-310`
+- Argon2 해시 생성 및 검증: `PasswordHasher`, `verify_password`,
+  `register_post`, `login_post`
 - 비밀번호 변경·재해시: `app.py`의 `update_password`
-- 기존 평문 자동 마이그레이션: `app.py:97-104`, `app.py:142-144`
+- 기존 평문 자동 마이그레이션: `migrate_plaintext_passwords`
 - 현재 `market.db`의 기존 사용자 2명 모두 Argon2 형식으로 변환 완료
 
 #### 세션 보안
@@ -207,15 +216,17 @@
 - [x] 비밀번호 변경 후 현재 세션과 다른 브라우저·Socket 세션을 무효화한다.
 - [x] 회원 탈퇴 전에 현재 비밀번호로 재인증한다.
 - [x] 회원 탈퇴 후 모든 HTTP 세션과 개인 Socket 연결을 무효화한다.
+- [x] 민감 작업 재인증 시도를 사용자·IP별로 제한한다.
 - [x] 소스 코드의 하드코딩된 `SECRET_KEY`를 제거한다.
 - [x] 32자 이상의 비밀키를 환경변수에서 불러오고 누락 시 실행을 중단한다.
 
 현재 근거:
 
-- 필수 환경 비밀키와 쿠키 설정: `app.py:29-59`
-- 유휴·절대 세션 만료 및 실제 사용자 확인: `app.py:229-261`
-- 로그인 시 세션 초기화 및 만료 기준 기록: `app.py:375-380`
-- 프로필 수정 재인증: `app.py:412-431`
+- 필수 환경 비밀키와 쿠키 설정: `get_required_secret_key`, `app.config`
+- 유휴·절대 세션 만료 및 실제 사용자 확인:
+  `session_timestamps_are_valid`, `load_and_validate_session`
+- 로그인 시 세션 초기화 및 만료 기준 기록: `login_post`
+- 프로필 수정 재인증: `profile_post`, `verify_sensitive_password`
 - 전체 세션 무효화: `app.py`의 `session_version`,
   `load_and_validate_session`, `get_authenticated_socket_user`
 - 비밀번호 변경 보안 테스트: `tests/test_account_security.py`
@@ -230,6 +241,7 @@
 - [x] 상품·신고·감사·1대1 메시지 외래키 보존을 위해 익명 사용자 행을 유지한다.
 - [x] 탈퇴 후 기존 사용자명을 새 계정에서 다시 사용할 수 있다.
 - [x] 기존 DB의 활성 사용자에 `deleted_at=NULL`을 호환 마이그레이션한다.
+- [x] 관리자 계정은 역할을 해제하기 전 회원 탈퇴를 차단한다.
 
 현재 근거:
 
@@ -244,8 +256,9 @@
 #### 실패 로그인 및 오류 처리
 
 - [x] 계정 기준 로그인 실패 횟수를 제한한다.
-- [ ] IP 기준 로그인 시도 속도를 제한한다.
+- [x] IP 기준 회원가입과 로그인 시도 속도를 제한한다.
 - [x] 5회 반복 실패 시 15분간 임시 잠금을 적용한다.
+- [x] 올바른 비밀번호로 표적 임시 잠금 상태를 안전하게 복구한다.
 - [x] 로그인 실패 메시지는 아이디와 비밀번호 중 어느 값이 틀렸는지 구분하지 않는다.
 - [x] 중복 회원가입 응답과 해시 비용을 성공 응답과 동일하게 처리한다.
 - [x] 운영 환경에서 디버그 모드를 기본 비활성화한다.
@@ -255,10 +268,12 @@
 
 현재 근거:
 
-- 실패 횟수 컬럼 마이그레이션: `app.py:84-94`
-- 실패 기록 및 계정 잠금: `app.py:213-226`, `app.py:349-358`
-- 일반화된 회원가입·로그인 응답: `app.py:298-319`, `app.py:344-358`
-- 디버그 기본 비활성화: `app.py:51-59`
+- 실패 횟수 컬럼 마이그레이션: `add_user_security_columns`
+- 실패 기록 및 계정 잠금: `record_failed_login`, `login_post`
+- 영속 가입·로그인 제한: `security_rate_limit`,
+  `consume_security_rate_limit`, `register_post`, `login_post`
+- 일반화된 회원가입·로그인 응답: `register_post`, `login_post`
+- 디버그 기본 비활성화: `app.config`, `MARKET_DEBUG`
 - 공통 오류 처리: `app.py`의 오류 처리기
 
 ### 2. 상품 등록 및 관리
@@ -266,7 +281,7 @@
 #### 폼 입력 및 데이터 검증
 
 - [x] 상품 제목을 정규화하고 1~100자 및 제어 문자를 서버에서 검증한다.
-- [x] 상품 설명을 1~2,000자로 제한하고 NUL 문자를 서버에서 거부한다.
+- [x] 상품 설명을 1~2,000자로 제한하고 Unicode 제어·서식 문자를 거부한다.
 - [x] 가격은 ASCII 숫자로만 입력받아 정수로 변환한다.
 - [x] 가격을 0~1,000,000,000원 범위로 검증한다.
 - [x] 공백 문자열을 필수 값으로 인정하지 않는다.
@@ -306,6 +321,9 @@
 - [x] 상품 수정은 서버에서 판매자 소유권을 확인한 뒤 허용한다.
 - [x] 상품 삭제는 서버에서 판매자 소유권을 확인한 뒤 허용한다.
 - [x] 수정·삭제 SQL에도 `seller_id` 조건을 다시 적용한다.
+- [x] 상품 등록을 사용자별 시간당 10개·총 100개로 제한한다.
+- [x] 공개·대시보드·관리 상품 목록을 페이지당 20건으로 제한한다.
+- [x] 상품 수정 SQL에서 관리자 제재 상태를 다시 확인한다.
 
 현재 근거:
 
@@ -314,6 +332,8 @@
   `login_required`
 - 본인 상품 목록 조회: `app.py`의 `manage_products`
 - 판매자 확인: `app.py`의 `require_product_owner`
+- 등록 제한·페이지네이션: `new_product_post`, `products`,
+  `dashboard`, `manage_products`, `security_rate_limit`
 - 수정·삭제 권한 테스트: `tests/test_product_security.py`
 
 #### 데이터 무결성
@@ -372,6 +392,8 @@
 - [x] 기존 기록은 Jinja 자동 이스케이프, 실시간 메시지는 `textContent`로
   출력한다.
 - [x] 전체 채팅과 1대1 채팅이 사용자·IP Rate Limiting을 공유한다.
+- [x] 사용자 차단·해제를 CSRF 보호 POST로 처리하고 양방향 전송을 차단한다.
+- [x] 사용자 목록과 대화 기록을 각각 100건 단위로 페이지 조회한다.
 - [x] 메시지 발신자·수신자 외래키, 자기 전송 금지, 길이·시각 DB 제약을
   적용한다.
 
@@ -383,6 +405,8 @@
   `direct_chat_room`, `handle_send_direct_message_event`
 - 메시지 스키마와 인덱스: `app.py`의 `ensure_direct_message_schema`
 - 안전한 기록·실시간 출력: `templates/direct_chat.html`
+- 차단 관계·라우트: `user_block`, `block_chat_user`,
+  `unblock_chat_user`, `users_are_blocked`
 - 권한·위조·XSS·DB 제약 테스트: `tests/test_direct_chat_security.py`
 
 #### Rate Limiting 및 연결 보안
@@ -393,7 +417,9 @@
 - [ ] 운영 환경에서 HTTPS와 WSS를 사용한다.
 - [x] `MARKET_REQUIRE_HTTPS=true`일 때 평문 HTTP·Socket 연결을 거부한다.
 - [x] 요청 Host와 Scheme이 일치하는 동일 Origin Socket 연결만 허용한다.
+- [x] Origin이 없는 Socket 연결을 거부한다.
 - [x] Socket.IO 전송 크기를 16 KiB로 제한한다.
+- [x] Socket 연결을 IP별 1분에 20회, 사용자별 동시 5개로 제한한다.
 
 현재 근거:
 
@@ -407,11 +433,11 @@
 
 현재 제한:
 
-- Rate Limiting 상태는 단일 프로세스 메모리에 있으므로 재시작 시 초기화된다.
+- 메시지 전송 Rate Limiting 상태는 단일 프로세스 메모리에 있으므로 재시작 시
+  초기화된다. 연결 시도 제한은 SQLite에 영속됩니다.
 - 다중 서버에서는 Redis 같은 공용 저장소가 필요하다.
 - 실제 운영 TLS 인증서와 프록시 배포는 저장소만으로 검증할 수 없다.
-- 1대1 메시지 보존 기간, 삭제, 차단 및 읽음 확인 정책은 아직 없다.
-- 최근 100건보다 오래된 기록을 조회하는 페이지네이션은 아직 없다.
+- 1대1 메시지 보존 기간, 삭제 및 읽음 확인 정책은 아직 없다.
 
 ### 4. 신고 및 안전 거래
 
@@ -422,7 +448,7 @@
 - [x] 자기 자신과 자신이 등록한 상품의 신고를 차단한다.
 - [x] 신고 사유를 정규화하고 10~1,000자 및 제어 문자를 검증한다.
 - [x] 이메일·전화번호·주민등록번호 패턴이 포함된 신고 사유 저장을 차단한다.
-- N/A: 현재 신고 사유를 출력하는 화면은 없으며 응답에 입력값을 반사하지 않는다.
+- [x] 신고 사유는 관리자 화면에서 Jinja 자동 이스케이프로만 출력한다.
 - [x] 신고자의 ID는 클라이언트 입력 대신 세션에서 가져온다.
 
 현재 근거:
@@ -437,7 +463,7 @@
 - [x] 신고 ID는 서버에서 UUID로 생성한다.
 - [x] 신고자·사용자 대상·상품 대상에 외래키와 타입 일관성 제약을 적용한다.
 - [x] 신고 생성 시각을 서버에서 저장한다.
-- [ ] 관리자 검토 상태와 처리자·처리 시각을 저장한다.
+- [x] 관리자 검토 상태와 처리자·처리 시각을 저장한다.
 - [x] 신고 접수와 검증·개인정보·중복·횟수 제한 실패를 추가 전용 감사 로그에 기록한다.
 - [x] 감사 로그에는 신고 사유와 IP 원문을 기록하지 않는다.
 - [x] 동일 신고자의 동일 사용자·상품 중복 신고를 제한한다.
@@ -445,7 +471,7 @@
 - [x] 사용자별 신고 시도를 1시간에 10건으로 제한한다.
 - [x] HMAC 처리된 IP별 신고 시도를 1시간에 20건으로 제한한다.
 - [x] 신뢰 프록시 수를 명시하지 않으면 전달된 IP 헤더를 사용하지 않는다.
-- [ ] 관리자 검토와 처리 상태 관리 절차를 구현한다.
+- [x] 관리자 완료·기각 처리 상태 관리 절차를 구현한다.
 - N/A: 별도의 안전 거래 기능은 아직 없음
 
 현재 근거:
@@ -455,6 +481,7 @@
 - 중복·횟수·자기 상품 신고 DB 방어: `app.py`의
   `ensure_report_schema_objects`
 - 신고와 감사 로그의 원자적 저장: `app.py`의 `report_post`
+- 검토 상태·추가 전용 감사: `report_review`, `admin_review_report`
 - 사용자·IP 제한과 IP HMAC: `app.py`의 `consume_report_rate_limit`,
   `get_client_ip_hash`
 - DB 우회·남용·감사 로그 테스트: `tests/test_report_security.py`
@@ -469,6 +496,7 @@
 - [x] 마지막 활성 관리자의 권한 해제를 차단한다.
 - [x] 일반 사용자와 비로그인 사용자의 관리자 API 접근을 차단한다.
 - [x] 관리자 자신과 다른 관리자의 휴면 처리를 차단한다.
+- [x] 관리자 계정 탈퇴 전에 역할 해제를 요구한다.
 
 현재 근거:
 
@@ -487,6 +515,8 @@
 - [x] 신고 증거 보존을 위해 상품과 신고 원본을 물리 삭제하지 않는다.
 - [x] 상품 제재 레코드의 수정·삭제를 DB Trigger로 차단한다.
 - [x] 관리자 역할을 DB Trigger에서도 다시 검증한다.
+- [x] 제재 당시 상품 제목·설명·가격·판매자 Snapshot을 보존한다.
+- [x] 관리 삭제와 동시에 발생하는 소유자 수정을 저장 단계에서 거부한다.
 
 현재 근거:
 
@@ -504,6 +534,8 @@
 - [x] 휴면 사용자의 로그인·채팅·신고 대상 접근을 차단한다.
 - [x] 휴면 사용자의 상품을 공개 기능에서 숨긴다.
 - [x] 휴면 해제 후 새 로그인만 허용하고 무효화된 과거 세션은 복구하지 않는다.
+- [x] 관리자 상태 변경은 최근 인증 또는 현재 비밀번호 재확인을 요구한다.
+- [x] 관리자 상태 변경을 계정별 10분에 20건으로 제한한다.
 
 현재 근거:
 
@@ -519,13 +551,16 @@
 - [x] 감사 로그의 UPDATE·DELETE를 DB Trigger로 차단한다.
 - [x] 감사 사유는 Jinja 자동 이스케이프로 출력한다.
 - [x] 최근 감사 이력을 관리자에게만 제공한다.
-- [ ] 관리자 역할 부여·해제 자체의 감사 이력을 저장한다.
+- [x] 관리자·대상 표시값 Snapshot으로 탈퇴·변경 이후에도 감사 문맥을 보존한다.
+- [x] 관리자 역할 부여·해제 자체의 감사 이력을 저장한다.
+- [x] 역할 변경 시 대상 사용자의 기존 세션을 무효화한다.
 - [ ] 감사 로그 보존 기간과 승인된 정리 절차를 구현한다.
 
 현재 근거:
 
-- 감사 스키마: `admin_action_audit`
+- 감사 스키마: `admin_action_audit`, `admin_role_audit`
 - 원자적 제재·감사 저장: 관리자 제재 POST 라우트
+- 역할 변경 감사: `scripts/admin_user.py`
 - 관리자 감사 화면: `templates/admin_moderation.html`
 
 ### 6. 전체 시스템
@@ -535,7 +570,7 @@
 - [x] 현재 동적 SQL 입력은 SQLite 파라미터 바인딩을 사용한다.
 - [x] 데이터베이스 파일을 Git 추적 대상에서 제외한다.
 - [ ] 기존 Git 이력에 포함된 민감 DB 데이터의 처리 방안을 결정한다.
-- [ ] 데이터베이스 파일 권한을 최소화한다.
+- [x] 애플리케이션이 데이터베이스 파일 권한을 `600`으로 제한한다.
 - [x] 애플리케이션의 SQLite 연결에서 외래키 검사를 활성화한다.
 - [x] 사용자·상품·신고·메시지 스키마 변경 시 재현 가능한 생성·마이그레이션
   절차를 사용한다.
@@ -547,31 +582,43 @@
 
 - 백업·검증·복구 도구: `scripts/database_backup.py`
 - 백업 안전성 테스트: `tests/test_database_backup.py`
+- 애플리케이션 DB 권한: `app.py`의 `get_db`,
+  `tests/test_account_security.py`
 
 #### HTTP 보안
 
 - [x] 환경변수로 애플리케이션의 평문 HTTP·Socket 요청을 거부할 수 있다.
 - [ ] 운영 환경에서 TLS 인증서와 HTTPS/WSS 강제를 검증한다.
-- [ ] HSTS를 적용한다.
-- [ ] Content-Security-Policy를 적용한다.
-- [ ] `X-Frame-Options` 또는 CSP `frame-ancestors`를 적용한다.
-- [ ] `X-Content-Type-Options: nosniff`를 적용한다.
-- [ ] 적절한 Referrer-Policy와 Permissions-Policy를 적용한다.
-- [ ] 신뢰할 수 있는 Host와 Origin 정책을 설정한다.
-
-#### 의존성 및 외부 리소스
-
-- [ ] Python 의존성 버전을 고정한다.
-- [ ] 재현 가능한 잠금 파일을 관리한다.
-- [ ] 정기적인 의존성 취약점 검사를 추가한다.
-- [ ] 실제 실행 환경에 필요한 패키지가 설치되는지 CI에서 검증한다.
-- [ ] CDN Socket.IO 스크립트에 SRI를 적용하거나 자체 호스팅한다.
-- [ ] 사용하지 않는 `flask-sqlalchemy` 의존성을 제거하거나 실제 사용 여부를 결정한다.
+- [x] HTTPS 응답에 HSTS를 적용한다.
+- [x] 요청별 nonce 기반 Content-Security-Policy를 적용한다.
+- [x] `X-Frame-Options`와 CSP `frame-ancestors`를 적용한다.
+- [x] `X-Content-Type-Options: nosniff`를 적용한다.
+- [x] Referrer-Policy와 Permissions-Policy를 적용한다.
+- [x] `MARKET_TRUSTED_HOSTS`와 동일 Origin 정책을 설정한다.
 
 현재 근거:
 
-- 버전이 고정되지 않은 의존성: `enviroments.yaml:7-10`
-- SRI 없는 외부 스크립트: `templates/base.html:7`
+- 보안 헤더: `app.py`의 `apply_security_headers`
+- Host·Origin: `get_trusted_hosts`, `socket_origin_is_allowed`
+- 회귀 테스트: `tests/test_account_security.py`,
+  `tests/test_chat_security.py`
+
+#### 의존성 및 외부 리소스
+
+- [x] Python 직접 의존성 버전을 고정한다.
+- [x] 버전과 배포 해시를 포함한 재현 가능한 잠금 파일을 관리한다.
+- [x] `pip-audit` 의존성 취약점 검사를 추가한다.
+- [x] 실제 잠금 환경 설치·일관성·테스트를 CI에서 검증한다.
+- [x] 외부 GitHub Actions를 릴리스 커밋 SHA로 고정한다.
+- [x] CDN Socket.IO 스크립트에 SHA-384 SRI를 적용한다.
+- [x] 사용하지 않는 `flask-sqlalchemy` 의존성을 제거한다.
+
+현재 근거:
+
+- 직접·잠금 의존성: `enviroments.yaml`, `requirements.in`,
+  `requirements.lock`
+- 자동 감사·테스트: `.github/workflows/security-tests.yml`
+- CDN SRI·CSP nonce: `templates/base.html`
 
 ## 우선순위별 작업 목록
 
@@ -596,14 +643,15 @@
 
 ### P2 — 운영 강화
 
-- [ ] 보안 헤더 적용
+- [x] 보안 헤더 적용
 - [x] 관리자 불량 상품 관리 삭제와 사용자 휴면·세션 차단
 - [x] 관리자 제재 감사 로그와 일반 사용자 권한 우회 방어
 - [x] 신고 접수 감사 로그와 사용자별 신고 남용 방지
 - [x] 신고 실패 감사 로그와 IP 기준 신고 제한
-- [ ] 관리자 처리 감사 로그와 감사 로그 보존 정책
-- [ ] 의존성 버전 고정 및 취약점 검사
-- [ ] 외부 스크립트 SRI 또는 자체 호스팅
+- [ ] 감사 로그 보존 기간과 승인된 정리 정책
+- [x] 관리자 신고 처리·역할 변경 감사 로그
+- [x] 의존성 버전 고정 및 취약점 검사
+- [x] 외부 스크립트 SRI
 - [ ] 공통 오류 처리와 민감정보 로그 필터링
 
 ## 공통 완료 조건
@@ -640,6 +688,7 @@
 
 | Version | Date | 변경 내용 |
 |---|---|---|
+| `3.1` | `2026-07-24` | 가입·로그인·재인증·상품·관리자·Socket 남용 제한, 신고 검토, 채팅 차단, 페이지네이션·인덱스·증거 Snapshot, 역할 감사, Host·보안 헤더·SRI·DB 권한·의존성 잠금·CI를 적용. 전체 자동 테스트 182개 통과 |
 | `3.0` | `2026-07-24` | 관리자 역할 기반 제재 화면, 불량 상품 논리 삭제·증거 보존, 사용자 휴면·해제와 세션·Socket 차단, 추가 전용 감사 로그·DB Trigger·권한 관리 CLI를 적용. 전체 자동 테스트 167개 통과 |
 | `2.1` | `2026-07-24` | 재인증·CSRF 기반 회원 탈퇴, 계정 익명화·세션과 Socket 종료, 참조 기록 보존과 공개 기능 비노출, 비로그인 상품 목록·상세 및 상품 ID 표시를 적용. 전체 자동 테스트 155개 통과 |
 | `2.0` | `2026-07-24` | 사용자 선택, 당사자 한정 기록 조회와 개인 Socket 방 전달, 영구 메시지 스키마·외래키·인덱스, 발신자 위조·XSS·속도 제한 방어를 적용한 실시간 1대1 채팅 추가. 전체 자동 테스트 145개 통과 |

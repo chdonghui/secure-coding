@@ -11,10 +11,21 @@
         <a href="{{ url_for('direct_chat', recipient_id=chat_user.id) }}">
           {{ chat_user.username }}
         </a>
+        {% if chat_user.is_blocked %}(차단 상태){% endif %}
       </li>
     {% endfor %}
   </ul>
 {% else %}
   <p>대화할 수 있는 다른 사용자가 없습니다.</p>
 {% endif %}
+
+<nav aria-label="대화 상대 페이지">
+  {% if pagination.has_previous %}
+    <a href="{{ url_for('direct_chat_users', page=pagination.page - 1) }}">이전</a>
+  {% endif %}
+  <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
+  {% if pagination.has_next %}
+    <a href="{{ url_for('direct_chat_users', page=pagination.page + 1) }}">다음</a>
+  {% endif %}
+</nav>
 {% endblock %}

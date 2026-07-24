@@ -17,6 +17,7 @@
 
 | Version | Date | 주요 보안 범위 | 검증 |
 |---|---|---|---|
+| `3.1` | `2026-07-24` | 남용 방지, 신고 검토·감사, 보안 헤더, 의존성 공급망 강화 | 자동 테스트 182개 통과 |
 | `3.0` | `2026-07-24` | 관리자 역할 기반 상품·사용자 제재와 감사 무결성 | 자동 테스트 167개 통과 |
 | `2.1` | `2026-07-24` | 안전한 회원 탈퇴와 공개 상품 조회 권한 분리 | 자동 테스트 155개 통과 |
 | `2.0` | `2026-07-24` | 1대1 채팅 권한 격리, 메시지 무결성 및 비공개 전달 | 자동 테스트 145개 통과 |
@@ -35,6 +36,146 @@
 - ⚠️: 일부 방어만 존재하거나 후속 개선 필요
 - ❌: 해당 버전에서 미적용
 - N/A: 해당 버전에 기능이 없음
+
+---
+
+## Version 3.1
+
+### 버전 정보
+
+| 항목 | 내용 |
+|---|---|
+| Version | `3.1` |
+| Date | `2026-07-24` |
+| 변경 유형 | Minor Version |
+| 적용 범위 | 계정·상품·Socket·관리자 남용 방지, 신고 검토, 차단, 페이지네이션, HTTP·DB·의존성 보안 |
+| 테스트 | 전체 `tests/`와 GitHub Actions 보안 Workflow |
+| 테스트 결과 | `182 passed`, `pip check`, `pip-audit` |
+
+기존 회원·상품·채팅·신고·관리 기능과 호환되는 방어와 소규모 스키마를
+추가했으므로 Minor Version을 증가시켰습니다.
+
+### Version 3.0과의 조치 전후 비교
+
+| 항목 | Version 3.0 | Version 3.1 |
+|---|---|---|
+| 회원가입·로그인 | 계정 잠금 중심 | IP별 영속 Rate Limit과 잠금 소유자 복구 |
+| 민감 작업 | 매번 비밀번호 확인 | 재확인 시도 제한과 최근 인증 관리자 Step-up |
+| 상품 등록·조회 | 등록 수 무제한, 전체 조회 | 등록 속도·총량 제한, 페이지네이션·인덱스 |
+| 신고 관리 | 신고 수만 표시 | 사유 표시, 완료·기각 상태와 검토 감사 |
+| 제재 증거 | 현재 FK 대상 참조 | 상품·관리자·대상 표시 Snapshot 추가 |
+| 관리자 역할 | CLI 변경, 변경 감사 없음 | 사유 필수, 세션 무효화, 추가 전용 역할 감사 |
+| 1대1 채팅 | 전송 제한만 적용 | 사용자 차단·해제와 연결 시도·동시 연결 제한 |
+| HTTP 방어 | HTTPS 선택 강제 | CSP·HSTS·Frame·MIME·정책·Host 검증 |
+| 의존성 | 일부 버전만 고정 | Python 3.12 전체 잠금·해시·감사·CI |
+| DB 파일 | 백업 파일만 권한 제한 | 애플리케이션 DB 연결 시 권한 `600` 적용 |
+
+### 상세 적용 내역
+
+| ID | 보안 조치 | 적용 내용 | 코드·테스트 근거 |
+|---|---|---|---|
+| `V3.1-AUTH-RATE-01` | 가입·로그인 남용 방지 | IP별 가입 5회/시간, 로그인 20회/15분을 SQLite에 영속 저장하며 성공 로그인으로 IP 제한을 초기화하지 않음 | `consume_security_rate_limit`, 계정 IP 제한 테스트 |
+| `V3.1-AUTH-LOCK-01` | 표적 잠금 완화 | 올바른 비밀번호는 임시 잠금을 해제하고 로그인하도록 변경 | `login_post`, `test_correct_password_recovers_temporarily_locked_account` |
+| `V3.1-REAUTH-01` | 재인증 Brute Force 방어 | 사용자·IP별 민감 작업 재인증 10회/15분 제한 | `verify_sensitive_password`, `test_sensitive_reauthentication_is_rate_limited` |
+| `V3.1-INPUT-01` | 식별자·비밀번호 강화 | ASCII 사용자명, 단순 비밀번호와 소개글·설명 Unicode 제어 문자 거부 | 입력 검증 함수, 계정·상품 입력 회귀 테스트 |
+| `V3.1-PRODUCT-RATE-01` | 상품 Spam 방지 | 사용자별 10개/시간과 총 100개 제한 | `new_product_post`, `test_product_creation_is_rate_limited_and_catalog_is_paginated` |
+| `V3.1-PAGE-01` | 대량 조회 제한 | 상품·관리자 20건, 대화 상대·기록 100건 단위 페이지네이션 | `get_page_number`, `build_pagination`, 목록 라우트·템플릿 |
+| `V3.1-QUERY-01` | 조회 비용 제한 | 상품·신고 대상 인덱스와 관리자 신고 수 묶음 집계 적용 | 스키마 생성 함수, `admin_moderation` |
+| `V3.1-PRODUCT-RACE-01` | 제재 동시성 방어 | 상품 수정 UPDATE에서 관리 삭제 상태를 재확인 | `edit_product_post` |
+| `V3.1-REPORT-REVIEW-01` | 신고 Workflow | 사유를 관리자에게 표시하고 완료·기각 처리자·사유·시각 저장 | `admin_review_report`, `report_review`, 관리자 회귀 테스트 |
+| `V3.1-REPORT-APPEND-01` | 검토 무결성 | 신고 검토 UPDATE·DELETE 차단과 관리자 역할 Trigger 적용 | `prevent_report_review_*`, `validate_report_review_admin` |
+| `V3.1-ADMIN-STEPUP-01` | 관리자 재확인 | 로그인·최근 비밀번호 확인 후 5분만 상태 변경 허용 | `enforce_admin_action_authorization`, 신고 검토 테스트 |
+| `V3.1-ADMIN-RATE-01` | 관리자 자동화 남용 제한 | 관리자별 상태 변경 20건/10분 제한 | 관리자 제한 테스트 |
+| `V3.1-ADMIN-SNAPSHOT-01` | 증거 보존 | 제재 당시 상품·관리자·대상 표시값 Snapshot 저장 | 제재·감사 스키마, 관리자 상품 삭제 테스트 |
+| `V3.1-ADMIN-ROLE-01` | 역할 변경 감사 | 운영자·대상·사유·시각 추가 전용 기록과 대상 세션 무효화 | `scripts/admin_user.py`, 역할 도구 테스트 |
+| `V3.1-ADMIN-DELETE-01` | 권한 고아 방지 | 관리자 계정은 역할 해제 전 회원 탈퇴 차단 | `delete_account`, 계정 탈퇴 테스트 |
+| `V3.1-CHAT-BLOCK-01` | 사용자 차단 | CSRF 보호 차단·해제와 양방향 직접 메시지 거부 | `user_block`, 차단 라우트·Socket 테스트 |
+| `V3.1-SOCKET-01` | 연결 남용 방지 | Origin 필수, IP별 20회/분과 사용자별 동시 5개 제한 | `handle_socket_connect`, 채팅 연결 테스트 |
+| `V3.1-HTTP-01` | 브라우저 방어 | Nonce CSP, HSTS, Frame, MIME, Referrer, Permissions와 no-store 헤더 | `apply_security_headers`, 헤더 회귀 테스트 |
+| `V3.1-HOST-01` | Host Header 방어 | 기본 로컬 Host만 허용하고 비신뢰 Host 오류를 링크 없는 400으로 처리 | `get_trusted_hosts`, `bad_request`, Host 회귀 테스트 |
+| `V3.1-SRI-01` | CDN 무결성 | Socket.IO 4.0.1 스크립트에 SHA-384 SRI 적용 | `templates/base.html`, 헤더·템플릿 테스트 |
+| `V3.1-DB-PERM-01` | DB 파일 권한 | DB 연결 시 파일 권한을 `600`으로 제한하고 실패 시 중단 | `get_db`, 권한 회귀 테스트 |
+| `V3.1-DEPS-01` | 공급망 고정 | 직접·간접 패키지의 버전·배포 해시 잠금, 미사용 SQLAlchemy 제거 | `requirements.in`, `requirements.lock`, `enviroments.yaml` |
+| `V3.1-CI-01` | 자동 보안 검증 | Action을 커밋 SHA로 고정하고 잠금 설치, `pip check`, `pip-audit`, 전체 pytest를 Push·PR에서 실행 | `.github/workflows/security-tests.yml` |
+
+### 데이터베이스 변경과 마이그레이션
+
+새 테이블:
+
+| 테이블 | 용도와 무결성 |
+|---|---|
+| `security_rate_limit` | 가입·로그인·재인증·상품·관리자·Socket 제한 Window와 횟수 저장 |
+| `user_block` | 차단자와 대상의 복합 기본키·외래키, 자기 차단 금지 |
+| `report_review` | 신고별 단일 완료·기각 결과, 관리자 Snapshot, 추가 전용 Trigger |
+| `admin_role_audit` | 역할 부여·해제의 운영자·대상 Snapshot·사유·시각, 추가 전용 Trigger |
+
+기존 테이블 변경:
+
+- `product_moderation`에 제목·설명·가격·판매자 Snapshot을 추가하고 기존 행은
+  참조 상품에서 안전하게 Backfill합니다.
+- `admin_action_audit`에 관리자명·대상 표시명 Snapshot을 추가하고 기존 행을
+  참조 대상에서 Backfill합니다.
+- 상품 판매자·제목, 신고 사용자·상품 대상, 역할·검토 감사 시각 인덱스를
+  추가합니다.
+- 오래된 Rate Limit 행은 요청 처리 중 24시간 기준으로 정리합니다.
+
+기존 DB는 `init_db()`가 트랜잭션 안에서 컬럼 추가·Backfill·Trigger 재생성을
+수행합니다. 실제 DB를 마이그레이션하기 전에는 애플리케이션을 중지하고 저장소
+밖에 권한 `600` 백업을 만들어야 합니다. 자동 테스트는 새 DB와 호환
+마이그레이션을 임시 DB에서 검증하며 실제 `market.db`나 사용자 백업을
+변경하지 않습니다.
+
+### 템플릿·의존성 및 환경변수 변경
+
+- 모든 inline Script·Style에 요청별 CSP nonce를 적용했습니다.
+- cdnjs Socket.IO 4.0.1에 SHA-384 SRI, CORS와 Referrer 설정을 추가했습니다.
+- 상품·채팅·관리자 템플릿에 페이지 이동과 차단·신고 검토 Form을 추가했습니다.
+- Python 기준을 3.12로 변경하고 Flask 3.1.3, Flask-SocketIO 5.6.1,
+  argon2-cffi 25.1.0, pytest 9.0.3, pip-audit 2.10.1을 직접 고정했습니다.
+- 전체 잠금과 해시는 `requirements.lock`, 직접 입력은 `requirements.in`에
+  기록했습니다.
+- GitHub Actions의 checkout 6.0.2와 setup-python 6.2.0도 검증한 커밋 SHA로
+  고정했습니다.
+- `MARKET_TRUSTED_HOSTS`는 쉼표로 구분한 허용 Host를 받으며 기본값은
+  `localhost`, `127.0.0.1`, `[::1]`입니다.
+- 실행·개발·간접 의존성의 역할과 설치 방법은 `README.md`에 기록했습니다.
+
+### 테스트 명령, 결과 및 검증 시나리오
+
+```sh
+python -m pytest -q
+python -m pip check
+python -m pip_audit --require-hashes -r requirements.lock
+git diff --check
+```
+
+결과:
+
+- 전체 자동 테스트: `182 passed`
+- 잠금 환경 의존성 일관성: `pip check` 통과
+- 알려진 Python 의존성 취약점: `pip-audit` 통과
+
+최초 감사에서 `pytest 8.4.2`의 `PYSEC-2026-1845`를 탐지했고 수정 버전
+`9.0.3`으로 올려 잠금 파일을 재생성한 뒤 다시 감사했습니다.
+
+주요 공격성 검증:
+
+- 동일 IP의 회원가입·로그인 반복, 사용자·IP 재인증 반복을 429로 차단
+- Unicode 방향 제어가 포함된 식별자·설명 거부
+- 비신뢰 Host와 Origin 없는 Socket, 사용자별 동시 Socket 초과 거부
+- 관리자 최근 인증 만료·상태 변경 초과와 역할·감사 기록 변조 차단
+- 신고 사유의 안전한 출력, 검토 결과의 추가 전용 저장
+- 차단 관계의 양방향 직접 메시지 거부와 CSRF 보호 해제
+- CSP nonce·SRI·HSTS·Frame·MIME·정책 헤더와 DB `600` 권한 검증
+
+### Version 3.1 이후 남은 보안 항목
+
+- 실제 운영 환경의 TLS 인증서·HTTPS/WSS 강제와 HSTS 동작 검증
+- 여러 인스턴스에 공통 적용되는 중앙 Rate Limit 저장소
+- 신고 재심·재할당, 감사 로그 보존 기간과 승인된 정리 절차
+- 비밀번호·세션·개인정보가 애플리케이션·프록시 로그에 남지 않는 중앙 필터
+- 기존 Git 이력에 포함됐을 수 있는 과거 민감 DB의 폐기·회전 절차
+- CDN을 제거하는 정적 Asset 자체 호스팅과 자동 업데이트 정책
 
 ---
 

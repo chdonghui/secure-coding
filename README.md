@@ -15,7 +15,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 운영 환경에 배포하지 않습니다. 원본 프로젝트와 외부 패키지를 사용할 때는 각
 저장소의 라이선스와 이용 조건을 별도로 확인해야 합니다.
 
-- 현재 버전: `3.0`
+- 현재 버전: `3.1`
 - AI 작업 규칙: [AGENTS.md](AGENTS.md)
 - 버전별 기능 설명: [FEATURE_CHANGELOG.md](FEATURE_CHANGELOG.md)
 - 버전별 보안 조치: [SECURITY_CHANGELOG.md](SECURITY_CHANGELOG.md)
@@ -27,7 +27,7 @@ Flask와 Flask-SocketIO로 만든 소규모 중고거래 학습 프로젝트입�
 - macOS
 - Homebrew
 - Git 및 GitHub
-- Python 3.9
+- Python 3.12
 - Miniconda
 - ChatGPT, Codex, Claude
 
@@ -159,35 +159,75 @@ python -m pip list
 있습니다. 패키지를 하나씩 설치하면 누락이나 버전 차이가 생길 수 있으므로 환경
 파일 사용을 우선합니다.
 
-### 직접 설치가 필요한 경우
+### 잠금 파일로 설치하는 방법
 
-환경 파일 설치가 정상적으로 끝났다면 아래 명령은 실행할 필요가 없습니다.
-패키지가 누락된 개발환경을 복구할 때만 활성화된 `secure_coding` 환경에서
-사용합니다.
+Conda를 사용하지 않을 때는 Python 3.12 가상환경에 해시가 고정된
+`requirements.lock`을 설치합니다. 이 파일은 직접·간접 의존성의 정확한 버전과
+배포 파일 SHA-256을 모두 고정합니다.
 
 ```sh
-conda activate secure_coding
-python -m pip install flask flask-socketio flask-sqlalchemy
-python -m pip install argon2-cffi==25.1.0 pytest==8.4.2
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --require-hashes -r requirements.lock
 python -m pip check
 ```
 
-직접 설치 후에는 다른 개발자도 같은 환경을 만들 수 있도록
-`enviroments.yaml`에도 해당 직접 의존성을 추가해야 합니다.
+`requirements.in`은 사람이 관리하는 직접 의존성 목록이고,
+`requirements.lock`은 설치와 CI에서 사용하는 전체 잠금 목록입니다. 임의로
+패키지를 하나씩 설치하면 검증한 조합과 달라질 수 있으므로 일반 개발자는
+`enviroments.yaml` 또는 `requirements.lock` 중 하나를 사용합니다.
 
-## 4. 직접 의존성
+## 4. 패키지와 의존성
 
-| 패키지 | 용도 | 설치·사용 출처 |
+### 직접 사용하는 PyPI 패키지
+
+| 패키지·버전 | 어디에 사용했는가 | 역할과 실제 사용 방식 |
 |---|---|---|
-| `flask` | 웹 라우트, 템플릿, 세션 및 요청 처리 | [Flask 공식 설치 문서](https://flask.palletsprojects.com/en/stable/installation/) |
-| `flask-socketio` | 실시간 채팅과 Socket.IO 서버 | [Flask-SocketIO 공식 설치 문서](https://flask-socketio.readthedocs.io/en/latest/intro.html#installation) |
-| `flask-sqlalchemy` | Flask용 SQLAlchemy 연동 패키지 | 현재 환경에는 포함되지만 애플리케이션은 아직 `sqlite3`를 직접 사용 |
-| `argon2-cffi==25.1.0` | 비밀번호 Argon2id 해시 및 검증 | [argon2-cffi 공식 문서](https://argon2-cffi.readthedocs.io/en/25.1.0/installation.html) |
-| `pytest==8.4.2` | 회원·프로필 보안 자동 테스트 | [pytest 공식 시작 문서](https://docs.pytest.org/en/stable/getting-started.html) |
+| [`Flask==3.1.3`](https://pypi.org/project/Flask/3.1.3/) | `app.py`, `templates/` | HTTP 라우트, 요청·응답, 세션, CSRF 처리, Jinja 템플릿과 오류 처리를 담당합니다. `Flask`, `request`, `session`, `render_template`, `abort` 등을 직접 import해 사용합니다. |
+| [`Flask-SocketIO==5.6.1`](https://pypi.org/project/Flask-SocketIO/5.6.1/) | `app.py`의 Socket 연결과 `send_message`, `send_direct_message` 이벤트 | 로그인된 사용자의 전체·1대1 실시간 채팅, 개인 Room, 연결 종료와 테스트 클라이언트를 제공합니다. `SocketIO`, `emit`, `send`, `join_room`, `disconnect`를 직접 사용합니다. |
+| [`argon2-cffi==25.1.0`](https://pypi.org/project/argon2-cffi/25.1.0/) | `app.py`의 회원가입, 로그인, 비밀번호 변경·탈퇴·관리자 재인증과 기존 DB 마이그레이션 | `PasswordHasher`로 비밀번호를 Argon2id 해시하고 `verify`로 비교합니다. 평문 비밀번호는 DB에 저장하지 않으며 필요하면 로그인 때 현재 파라미터로 재해시합니다. |
+| [`pytest==9.0.3`](https://pypi.org/project/pytest/9.0.3/) | `tests/` 전체 | 정상·실패·권한 우회·XSS·CSRF·Rate Limit·DB Trigger·마이그레이션을 자동 회귀 테스트합니다. 애플리케이션 실행에는 필요 없지만 개발과 CI 검증에 필요합니다. |
+| [`pip-audit==2.10.1`](https://pypi.org/project/pip-audit/2.10.1/) | `.github/workflows/security-tests.yml`, 로컬 보안 점검 | Python Packaging Advisory Database 등 알려진 취약점 정보를 기준으로 잠금 의존성을 검사합니다. 애플리케이션 런타임이 아닌 개발·CI 도구입니다. |
 
-`argon2-cffi`와 `pytest`는 Version `1.1` 보안 개선 과정에서 추가했습니다.
-각 패키지가 필요로 하는 하위 의존성은 pip와 Conda가 자동으로 설치하므로
-애플리케이션에서 직접 사용하지 않는 하위 패키지를 개별 설치할 필요는 없습니다.
+설치 명령은 모두 다음 입력 파일에 같은 버전으로 기록되어 있습니다.
+
+- `enviroments.yaml`: Python 3.12 Conda 환경과 직접 PyPI 의존성
+- `requirements.in`: 잠금 파일 생성의 직접 의존성 입력
+- `requirements.lock`: 직접·간접 의존성, 버전과 해시를 포함한 설치 기준
+
+직접 의존성만 임시로 확인하는 명령은 아래와 같지만, 실제 프로젝트 환경은 위
+잠금 파일 설치 방법을 사용해야 합니다.
+
+```sh
+python -m pip install -r requirements.in
+```
+
+### 자동 설치되는 간접 의존성
+
+아래 패키지는 소스에서 직접 import하기 위한 목록이 아니라, 위 직접 패키지가
+내부 동작을 위해 요구하는 하위 패키지입니다. 개별 설치하지 않습니다.
+
+| 상위 기능 | 잠금된 간접 패키지 | 맡는 역할 |
+|---|---|---|
+| Flask 웹 실행 | `blinker`, `click`, `itsdangerous`, `Jinja2`, `MarkupSafe`, `Werkzeug` | Signal, CLI, 서명, 템플릿, HTML 안전 문자열, WSGI·요청 처리를 지원합니다. |
+| Socket.IO·WebSocket | `bidict`, `python-engineio`, `python-socketio`, `simple-websocket`, `h11`, `wsproto` | Socket.IO 프로토콜, Engine.IO 전송, WebSocket과 HTTP/1.1 처리를 지원합니다. |
+| Argon2 | `argon2-cffi-bindings`, `cffi`, `pycparser`, `typing-extensions` | Argon2 네이티브 바인딩과 Python C FFI 호환 계층을 제공합니다. |
+| pytest | `iniconfig`, `packaging`, `pluggy`, `Pygments` | 테스트 설정, 버전 처리, Plugin 실행과 실패 출력 강조를 지원합니다. |
+| pip-audit | `boolean-py`, `CacheControl`, `certifi`, `charset-normalizer`, `cyclonedx-python-lib`, `defusedxml`, `filelock`, `idna`, `license-expression`, `markdown-it-py`, `mdurl`, `msgpack`, `packageurl-python`, `pip`, `pip-api`, `pip-requirements-parser`, `platformdirs`, `py-serializable`, `pyparsing`, `requests`, `rich`, `sortedcontainers`, `tomli`, `tomli-w`, `urllib3` | 잠금 파일 해석, Advisory 조회, HTTP 인증서 검증, 캐시, Package URL·SBOM 자료 구조와 CLI 출력을 지원합니다. |
+
+정확한 간접 버전과 플랫폼별 해시는 `requirements.lock`이 단일 기준입니다.
+예를 들어 소스에서는 SQLite를 사용하지만 Python 표준 라이브러리의 `sqlite3`를
+사용하므로 별도 PyPI 패키지나 `Flask-SQLAlchemy`가 필요하지 않습니다.
+`hashlib`, `hmac`, `ipaddress`, `secrets`, `threading`, `unicodedata`, `uuid`도
+Python 표준 라이브러리입니다.
+
+### 브라우저 의존성
+
+`templates/base.html`은 실시간 채팅 클라이언트로 cdnjs의
+`Socket.IO JavaScript 4.0.1`을 불러옵니다. PyPI 패키지가 아니며
+`Flask-SocketIO` 서버와 브라우저 사이의 연결에 사용됩니다. 파일 변조를 막기
+위해 `integrity` SHA-384와 `crossorigin="anonymous"`를 지정했습니다. CSP도
+cdnjs 스크립트만 명시적으로 허용합니다.
 
 ## 5. 실행 설정
 
@@ -223,6 +263,7 @@ export MARKET_COOKIE_SECURE=true
 export MARKET_DEBUG=false
 export MARKET_REQUIRE_HTTPS=true
 export MARKET_TRUSTED_PROXY_COUNT=1
+export MARKET_TRUSTED_HOSTS="<ASSIGNED_NGROK_HOST>"
 ```
 
 `MARKET_DEBUG=true`는 오류 정보가 노출될 수 있으므로 공개 환경에서 사용하면
@@ -232,6 +273,20 @@ export MARKET_TRUSTED_PROXY_COUNT=1
 거부합니다. HTTPS 페이지에서 실행되는 채팅 클라이언트는 같은 Origin의 WSS
 연결을 사용합니다. TLS 인증서와 HTTPS 종료는 ngrok 또는 통제하는 리버스
 프록시에서 제공해야 합니다.
+
+### 신뢰 Host 설정
+
+Host Header 공격을 막기 위해 기본값은 `localhost`, `127.0.0.1`, `[::1]`만
+허용합니다. 다른 개발 도메인이나 ngrok 주소를 사용할 때 Scheme과 경로를
+제외한 Host만 쉼표로 구분해 지정합니다.
+
+```sh
+export MARKET_TRUSTED_HOSTS="market.example,localhost"
+```
+
+ngrok이 `https://example.ngrok-free.app`을 할당했다면 값은
+`example.ngrok-free.app`입니다. `https://`나 `/path`를 넣으면 안전을 위해
+애플리케이션 시작을 중단합니다.
 
 ### 신뢰 프록시 설정
 
@@ -252,15 +307,17 @@ export MARKET_TRUSTED_PROXY_COUNT=1
 실제 프록시 수보다 큰 값을 설정하면 공격자가 전달한 IP 헤더를 신뢰할 수
 있습니다. 프록시 구성을 확인할 수 없다면 기본값 `0`을 유지하세요.
 
-채팅은 동일 Origin 연결만 허용하고 연결 시 세션 CSRF Token을 확인합니다.
+채팅은 Origin이 없는 연결과 교차 Origin 연결을 거부하고 연결 시 세션 CSRF
+Token을 확인합니다.
 메시지는 1~500자이며 브라우저의 `textContent`로 출력됩니다. 기본 전송 제한은
 사용자별 10초에 5건, IP별 1분에 30건이고 동일 메시지는 5초 안에 반복할 수
-없습니다.
+없습니다. 연결 시도는 IP별 1분에 20회, 동시 연결은 사용자별 5개로 제한합니다.
 
 상단의 `1대1 채팅` 메뉴에서는 다른 사용자를 선택해 비공개 메시지를 전송할 수
 있습니다. 1대1 메시지는 발신자와 수신자에게만 실시간 전달되고 SQLite에
-저장되며, 대화 화면은 최근 100건을 표시합니다. 전체 채팅과 1대1 채팅은 동일한
-사용자·IP 전송 제한을 공유합니다.
+저장되며, 대화 화면은 페이지당 최근 100건을 표시합니다. 사용자는 상대를
+차단·해제할 수 있고 어느 한쪽이 차단하면 직접 메시지 전송이 거부됩니다. 전체
+채팅과 1대1 채팅은 동일한 사용자·IP 전송 제한을 공유합니다.
 
 ## 6. 애플리케이션 실행
 
@@ -285,13 +342,15 @@ http://127.0.0.1:5000
 
 ### 관리자 권한 설정과 제재 화면
 
-Version `3.0` 마이그레이션은 기존 사용자를 일반 사용자로 유지하며 관리자 권한을
+Version `3.1` 마이그레이션은 기존 사용자를 일반 사용자로 유지하며 관리자 권한을
 자동 부여하지 않습니다. 애플리케이션을 한 번 실행해 최신 스키마를 만든 뒤,
 로컬 터미널에서 신뢰하는 기존 사용자에게 권한을 명시적으로 부여합니다.
 
 ```sh
 python scripts/admin_user.py --database market.db grant \
-  --username "<ADMIN_USERNAME>"
+  --username "<ADMIN_USERNAME>" \
+  --operator "<OPERATOR_ID>" \
+  --reason "<10~500자의 권한 부여 사유>"
 ```
 
 활성 관리자 목록 확인과 권한 해제:
@@ -299,12 +358,18 @@ python scripts/admin_user.py --database market.db grant \
 ```sh
 python scripts/admin_user.py --database market.db list
 python scripts/admin_user.py --database market.db revoke \
-  --username "<ADMIN_USERNAME>"
+  --username "<ADMIN_USERNAME>" \
+  --operator "<OPERATOR_ID>" \
+  --reason "<10~500자의 권한 해제 사유>"
 ```
 
-마지막 활성 관리자의 권한은 해제할 수 없습니다. 관리자 계정으로 로그인하면
+역할 변경은 대상의 기존 세션을 무효화하고 추가 전용 감사 로그에 운영자·대상·
+사유·시각을 남깁니다. `--operator`를 생략하면 현재 OS 사용자명을 기록합니다.
+마지막 활성 관리자의 권한은 해제할 수 없습니다. 관리자 계정은 권한을 먼저
+해제해야 회원 탈퇴할 수 있습니다. 관리자 계정으로 로그인하면
 상단의 `관리자 제재` 메뉴에서 다음 작업을 수행할 수 있습니다.
 
+- 신고 사유와 상태를 확인하고 승인 완료 또는 기각 처리
 - 신고 수를 참고해 불량 상품을 관리 삭제
 - 일반 사용자를 휴면 처리하고 기존 HTTP·Socket 세션 종료
 - 휴면 사용자 재활성화
@@ -313,7 +378,8 @@ python scripts/admin_user.py --database market.db revoke \
 관리 삭제된 상품은 공개·상세·소유자 관리 화면에서 숨겨지지만 신고 증거와 감사
 무결성을 위해 DB 행을 물리적으로 지우지 않습니다. 휴면 사용자는 로그인·채팅·
 신고 대상에서 제외되고 등록 상품도 숨겨집니다. 관리자 자신과 다른 관리자는
-휴면 처리할 수 없습니다.
+휴면 처리할 수 없습니다. 관리자 상태 변경은 최근 인증 또는 현재 비밀번호
+확인을 요구하고 계정별 처리 속도도 제한합니다.
 
 ### ngrok으로 외부 HTTPS 주소 열기
 
@@ -325,13 +391,16 @@ ngrok http 5000
 ```
 
 ngrok이 표시한 `https://...ngrok...` 주소로 접속합니다. 이 개발 서버와 ngrok
-터널은 테스트 용도이며 운영 배포 방식으로 사용하지 않습니다.
+터널은 테스트 용도이며 운영 배포 방식으로 사용하지 않습니다. 실행 전에 표시된
+주소의 Host를 `MARKET_TRUSTED_HOSTS`에 설정해야 합니다.
 
 ## 7. 보안 테스트
 
 ```sh
 conda activate secure_coding
 python -m pytest -q
+python -m pip check
+python -m pip_audit --require-hashes -r requirements.lock
 ```
 
 현재 버전에서 검증하는 보안 시나리오와 결과는
@@ -408,3 +477,4 @@ HTTPS 주소에서는 `MARKET_COOKIE_SECURE=true`를 사용합니다.
 - [Flask-SocketIO 설치](https://flask-socketio.readthedocs.io/en/latest/intro.html#installation)
 - [argon2-cffi 설치](https://argon2-cffi.readthedocs.io/en/25.1.0/installation.html)
 - [pytest 시작하기](https://docs.pytest.org/en/stable/getting-started.html)
+- [pip-audit](https://pypi.org/project/pip-audit/)

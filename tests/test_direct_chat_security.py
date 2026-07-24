@@ -283,6 +283,44 @@ def test_direct_message_is_persisted_and_delivered_only_to_participants(
     outsider_socket.disconnect()
 
 
+def test_user_can_block_and_unblock_direct_messages(
+    direct_chat_database,
+):
+    sender_http = authenticated_client(SENDER_ID)
+    sender_socket = connect_socket(sender_http, SENDER_ID)
+
+    block_response = sender_http.post(
+        f'/chat/{RECIPIENT_ID}/block',
+        data={'csrf_token': f'csrf-{SENDER_ID}'},
+    )
+    assert block_response.status_code == 302
+    blocked_result = sender_socket.emit(
+        'send_direct_message',
+        {'recipient_id': RECIPIENT_ID, 'message': '차단 중 전송 시도'},
+        callback=True,
+    )
+    assert blocked_result == {
+        'ok': False,
+        'error': 'recipient_blocked',
+    }
+    assert fetch_direct_messages() == []
+    assert '차단 상태' in sender_http.get('/chat').get_data(as_text=True)
+
+    unblock_response = sender_http.post(
+        f'/chat/{RECIPIENT_ID}/unblock',
+        data={'csrf_token': f'csrf-{SENDER_ID}'},
+    )
+    assert unblock_response.status_code == 302
+    allowed_result = sender_socket.emit(
+        'send_direct_message',
+        {'recipient_id': RECIPIENT_ID, 'message': '차단 해제 후 전송'},
+        callback=True,
+    )
+    assert allowed_result['ok'] is True
+    assert len(fetch_direct_messages()) == 1
+    sender_socket.disconnect()
+
+
 @pytest.mark.parametrize(
     'payload',
     [

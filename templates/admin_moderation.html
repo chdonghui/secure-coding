@@ -32,6 +32,14 @@
             maxlength="500"
             required
           ></textarea>
+          현재 비밀번호:
+          <input
+            type="password"
+            name="current_password"
+            maxlength="128"
+            autocomplete="current-password"
+            required
+          >
           <button type="submit">불량 상품 관리 삭제</button>
         </form>
       </li>
@@ -40,6 +48,23 @@
 {% else %}
   <p>관리 삭제할 수 있는 상품이 없습니다.</p>
 {% endif %}
+<nav aria-label="관리 상품 페이지">
+  {% if product_pagination.has_previous %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      product_page=product_pagination.page - 1
+    ) }}">이전</a>
+  {% endif %}
+  <span>
+    {{ product_pagination.page }} / {{ product_pagination.total_pages }}
+  </span>
+  {% if product_pagination.has_next %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      product_page=product_pagination.page + 1
+    ) }}">다음</a>
+  {% endif %}
+</nav>
 
 <h3>사용자 휴면 관리</h3>
 {% if users %}
@@ -69,6 +94,14 @@
               maxlength="500"
               required
             ></textarea>
+            현재 비밀번호:
+            <input
+              type="password"
+              name="current_password"
+              maxlength="128"
+              autocomplete="current-password"
+              required
+            >
             <button type="submit">휴면 해제</button>
           </form>
         {% else %}
@@ -88,6 +121,14 @@
               maxlength="500"
               required
             ></textarea>
+            현재 비밀번호:
+            <input
+              type="password"
+              name="current_password"
+              maxlength="128"
+              autocomplete="current-password"
+              required
+            >
             <button type="submit">불량 사용자 휴면</button>
           </form>
         {% endif %}
@@ -97,6 +138,94 @@
 {% else %}
   <p>관리할 사용자가 없습니다.</p>
 {% endif %}
+<nav aria-label="관리 사용자 페이지">
+  {% if user_pagination.has_previous %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      user_page=user_pagination.page - 1
+    ) }}">이전</a>
+  {% endif %}
+  <span>{{ user_pagination.page }} / {{ user_pagination.total_pages }}</span>
+  {% if user_pagination.has_next %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      user_page=user_pagination.page + 1
+    ) }}">다음</a>
+  {% endif %}
+</nav>
+
+<h3>신고 검토</h3>
+{% if reports %}
+  <ul>
+    {% for report in reports %}
+      <li>
+        <strong>{{ report.target_type }}</strong>
+        <p>신고 ID: <code>{{ report.id }}</code></p>
+        <p>신고자: {{ report.reporter_username }}</p>
+        {% if report.target_username %}
+          <p>대상 사용자: {{ report.target_username }}</p>
+        {% endif %}
+        {% if report.target_product_title %}
+          <p>대상 상품: {{ report.target_product_title }}</p>
+        {% endif %}
+        <p>신고 사유: {{ report.reason }}</p>
+        <p>상태: {{ report.review_status }}</p>
+        {% if report.review_status == 'pending' %}
+          <form
+            method="post"
+            action="{{ url_for('admin_review_report', report_id=report.id) }}"
+          >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            처리 결과:
+            <select name="status" required>
+              <option value="resolved">조치 완료</option>
+              <option value="dismissed">반려</option>
+            </select>
+            검토 사유:
+            <textarea
+              name="reason"
+              minlength="10"
+              maxlength="500"
+              required
+            ></textarea>
+            현재 비밀번호:
+            <input
+              type="password"
+              name="current_password"
+              maxlength="128"
+              autocomplete="current-password"
+              required
+            >
+            <button type="submit">검토 저장</button>
+          </form>
+        {% else %}
+          <p>검토자: {{ report.reviewer_username }}</p>
+          <p>검토 사유: {{ report.review_note }}</p>
+          <p>검토 시각: {{ report.reviewed_at }}</p>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>검토할 신고가 없습니다.</p>
+{% endif %}
+<nav aria-label="신고 검토 페이지">
+  {% if report_pagination.has_previous %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      report_page=report_pagination.page - 1
+    ) }}">이전</a>
+  {% endif %}
+  <span>
+    {{ report_pagination.page }} / {{ report_pagination.total_pages }}
+  </span>
+  {% if report_pagination.has_next %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      report_page=report_pagination.page + 1
+    ) }}">다음</a>
+  {% endif %}
+</nav>
 
 <h3>최근 관리자 감사 이력</h3>
 {% if audit_events %}
@@ -119,4 +248,19 @@
 {% else %}
   <p>관리자 처리 이력이 없습니다.</p>
 {% endif %}
+<nav aria-label="감사 이력 페이지">
+  {% if audit_pagination.has_previous %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      audit_page=audit_pagination.page - 1
+    ) }}">이전</a>
+  {% endif %}
+  <span>{{ audit_pagination.page }} / {{ audit_pagination.total_pages }}</span>
+  {% if audit_pagination.has_next %}
+    <a href="{{ url_for(
+      'admin_moderation',
+      audit_page=audit_pagination.page + 1
+    ) }}">다음</a>
+  {% endif %}
+</nav>
 {% endblock %}

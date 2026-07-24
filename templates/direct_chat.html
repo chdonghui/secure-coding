@@ -3,6 +3,25 @@
 {% block content %}
 <h2>{{ recipient.username }}님과의 1대1 채팅</h2>
 <p><a href="{{ url_for('direct_chat_users') }}">대화 상대 목록</a></p>
+{% if blocked_by_current_user %}
+  <form
+    method="post"
+    action="{{ url_for('unblock_chat_user', recipient_id=recipient.id) }}"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit">차단 해제</button>
+  </form>
+{% elif is_blocked %}
+  <p>상대방의 차단으로 메시지를 주고받을 수 없습니다.</p>
+{% else %}
+  <form
+    method="post"
+    action="{{ url_for('block_chat_user', recipient_id=recipient.id) }}"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit">사용자 차단</button>
+  </form>
+{% endif %}
 
 <div id="direct_chat">
   <ul id="direct_messages">
@@ -13,6 +32,23 @@
       </li>
     {% endfor %}
   </ul>
+  <nav aria-label="대화 기록 페이지">
+    {% if pagination.has_previous %}
+      <a href="{{ url_for(
+        'direct_chat',
+        recipient_id=recipient.id,
+        page=pagination.page - 1
+      ) }}">최근 기록</a>
+    {% endif %}
+    <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
+    {% if pagination.has_next %}
+      <a href="{{ url_for(
+        'direct_chat',
+        recipient_id=recipient.id,
+        page=pagination.page + 1
+      ) }}">이전 기록</a>
+    {% endif %}
+  </nav>
   <p id="direct_chat_status" aria-live="polite"></p>
   <input
     id="direct_chat_input"
@@ -20,13 +56,19 @@
     maxlength="500"
     autocomplete="off"
     placeholder="메시지를 입력하세요"
+    {% if is_blocked %}disabled{% endif %}
   >
-  <button id="direct_chat_send" type="button">전송</button>
+  <button
+    id="direct_chat_send"
+    type="button"
+    {% if is_blocked %}disabled{% endif %}
+  >전송</button>
 </div>
 
-<script type="text/javascript">
+<script type="text/javascript" nonce="{{ csp_nonce() }}">
   var currentUserId = {{ user.id|tojson }};
   var recipientId = {{ recipient.id|tojson }};
+  var directChatBlocked = {{ is_blocked|tojson }};
   var directSocket = io({
     auth: {
       csrf_token: {{ csrf_token()|tojson }}
@@ -64,6 +106,9 @@
   }
 
   function sendDirectMessage() {
+    if (directChatBlocked) {
+      return;
+    }
     var input = document.getElementById('direct_chat_input');
     var message = input.value;
     if (!message) {

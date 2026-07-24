@@ -111,6 +111,27 @@ def test_socket_connection_requires_authenticated_session_and_csrf(
     authenticated.disconnect()
 
 
+def test_socket_origin_is_required_and_concurrent_connections_are_limited(
+    flask_client,
+    monkeypatch,
+):
+    assert market.socket_origin_is_allowed(
+        None,
+        {
+            'wsgi.url_scheme': 'http',
+            'HTTP_HOST': 'localhost',
+        },
+    ) is False
+
+    monkeypatch.setattr(market, 'SOCKET_MAX_CONNECTIONS_PER_USER', 1)
+    authenticate_http_client(flask_client)
+    first_socket = connect_socket(flask_client)
+    second_socket = connect_socket(flask_client)
+    assert first_socket.is_connected()
+    assert not second_socket.is_connected()
+    first_socket.disconnect()
+
+
 def test_server_validates_message_and_generates_sender_metadata(flask_client):
     authenticate_http_client(flask_client)
     socket_client = connect_socket(flask_client)

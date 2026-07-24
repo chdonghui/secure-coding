@@ -17,6 +17,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for
 from flask_socketio import SocketIO, disconnect, emit, join_room, send
+from werkzeug.exceptions import SecurityError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
@@ -52,10 +53,35 @@ DIRECT_CHAT_USER_LIST_LIMIT = 100
 DIRECT_CHAT_HISTORY_LIMIT = 100
 MAX_FAILED_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 15 * 60
+REGISTER_IP_RATE_LIMIT = 5
+REGISTER_RATE_WINDOW_SECONDS = 60 * 60
+LOGIN_IP_RATE_LIMIT = 20
+LOGIN_RATE_WINDOW_SECONDS = 15 * 60
+REAUTH_RATE_LIMIT = 10
+REAUTH_RATE_WINDOW_SECONDS = 15 * 60
+ADMIN_ACTION_RATE_LIMIT = 20
+ADMIN_ACTION_RATE_WINDOW_SECONDS = 10 * 60
+ADMIN_RECENT_AUTH_SECONDS = 5 * 60
+PRODUCT_CREATE_RATE_LIMIT = 10
+PRODUCT_CREATE_RATE_WINDOW_SECONDS = 60 * 60
+MAX_PRODUCTS_PER_USER = 100
+SOCKET_CONNECT_IP_RATE_LIMIT = 20
+SOCKET_CONNECT_RATE_WINDOW_SECONDS = 60
+SOCKET_MAX_CONNECTIONS_PER_USER = 5
+RATE_LIMIT_RETENTION_SECONDS = 24 * 60 * 60
+PAGE_SIZE = 20
+MAX_PAGE_NUMBER = 10_000
 SESSION_IDLE_SECONDS = 30 * 60
 SESSION_ABSOLUTE_SECONDS = 8 * 60 * 60
 CSRF_SESSION_KEY = '_csrf_token'
 ACCOUNT_DELETION_CONFIRMATION = '회원탈퇴'
+COMMON_PASSWORDS = {
+    '123456789012',
+    'Password1234',
+    'Qwerty123456',
+    'Welcome12345',
+    'Admin1234567',
+}
 REPORT_SENSITIVE_DATA_ERROR = (
     '신고 사유에 이메일, 전화번호 또는 '
     '주민등록번호를 입력할 수 없습니다.'
@@ -109,9 +135,26 @@ def get_integer_env(name, default, minimum=0, maximum=5):
     return parsed_value
 
 
+def get_trusted_hosts():
+    value = os.environ.get('MARKET_TRUSTED_HOSTS')
+    if value is None:
+        return ['localhost', '127.0.0.1', '[::1]']
+    hosts = [host.strip().lower() for host in value.split(',') if host.strip()]
+    if not hosts or any(
+        '/' in host
+        or '\\' in host
+        or any(character.isspace() for character in host)
+        for host in hosts
+    ):
+        raise RuntimeError(
+            'MARKET_TRUSTED_HOSTS에는 쉼표로 구분한 Host 이름만 설정해야 합니다.'
+        )
+    return hosts
+
+
 def socket_origin_is_allowed(origin, environ):
     if origin is None:
-        return True
+        return False
     if not isinstance(origin, str):
         return False
     scheme = environ.get('wsgi.url_scheme')
@@ -159,6 +202,7 @@ app.config.update(
     SESSION_COOKIE_SECURE=get_boolean_env('MARKET_COOKIE_SECURE', True),
     REQUIRE_HTTPS=get_boolean_env('MARKET_REQUIRE_HTTPS', False),
     TRUSTED_PROXY_COUNT=trusted_proxy_count,
+    TRUSTED_HOSTS=get_trusted_hosts(),
 )
 DATABASE = 'market.db'
 socketio = SocketIO(
@@ -190,8 +234,17 @@ def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = sqlite3.connect(DATABASE)
+        try:
+            os.chmod(DATABASE, 0o600)
+        except OSError as error:
+            db.close()
+            g._database = None
+            raise RuntimeError(
+                '데이터베이스 파일 권한을 안전하게 설정할 수 없습니다.'
+            ) from error
         db.row_factory = sqlite3.Row  # 결과를 dict처럼 사용하기 위함
         db.execute('PRAGMA foreign_keys = ON')
+        db.execute('PRAGMA busy_timeout = 5000')
     return db
 
 
@@ -312,6 +365,10 @@ def create_moderation_tables(cursor):
                 CHECK(instr(reason, char(0)) = 0),
             created_at INTEGER NOT NULL
                 CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            title_snapshot TEXT NOT NULL,
+            description_snapshot TEXT NOT NULL,
+            price_snapshot INTEGER NOT NULL,
+            seller_id_snapshot TEXT NOT NULL,
             FOREIGN KEY (product_id) REFERENCES product(id) ON DELETE RESTRICT,
             FOREIGN KEY (admin_id) REFERENCES user(id) ON DELETE RESTRICT
         )
@@ -351,6 +408,8 @@ def create_moderation_tables(cursor):
                     {MODERATION_REASON_MIN_LENGTH}
                     AND {MODERATION_REASON_MAX_LENGTH})
                 CHECK(instr(reason, char(0)) = 0),
+            admin_username_snapshot TEXT NOT NULL,
+            target_label_snapshot TEXT NOT NULL,
             created_at INTEGER NOT NULL
                 CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
             CHECK(
@@ -374,6 +433,188 @@ def create_moderation_tables(cursor):
     """)
 
 
+def migrate_moderation_metadata(cursor):
+    product_columns = {
+        row['name']
+        for row in cursor.execute(
+            'PRAGMA table_info(product_moderation)'
+        ).fetchall()
+    }
+    audit_columns = {
+        row['name']
+        for row in cursor.execute(
+            'PRAGMA table_info(admin_action_audit)'
+        ).fetchall()
+    }
+    required_product_columns = {
+        'title_snapshot': 'TEXT',
+        'description_snapshot': 'TEXT',
+        'price_snapshot': 'INTEGER',
+        'seller_id_snapshot': 'TEXT',
+    }
+    required_audit_columns = {
+        'admin_username_snapshot': 'TEXT',
+        'target_label_snapshot': 'TEXT',
+    }
+    if not required_product_columns.keys() <= product_columns:
+        cursor.execute('DROP TRIGGER IF EXISTS prevent_product_moderation_update')
+        for column_name, column_type in required_product_columns.items():
+            if column_name not in product_columns:
+                cursor.execute(
+                    f'ALTER TABLE product_moderation '
+                    f'ADD COLUMN {column_name} {column_type}'
+                )
+        cursor.execute(
+            '''
+            UPDATE product_moderation
+            SET
+                title_snapshot = (
+                    SELECT title FROM product
+                    WHERE product.id = product_moderation.product_id
+                ),
+                description_snapshot = (
+                    SELECT description FROM product
+                    WHERE product.id = product_moderation.product_id
+                ),
+                price_snapshot = (
+                    SELECT price FROM product
+                    WHERE product.id = product_moderation.product_id
+                ),
+                seller_id_snapshot = (
+                    SELECT seller_id FROM product
+                    WHERE product.id = product_moderation.product_id
+                )
+            WHERE
+                title_snapshot IS NULL
+                OR description_snapshot IS NULL
+                OR price_snapshot IS NULL
+                OR seller_id_snapshot IS NULL
+            '''
+        )
+    if not required_audit_columns.keys() <= audit_columns:
+        cursor.execute('DROP TRIGGER IF EXISTS prevent_admin_action_audit_update')
+        for column_name, column_type in required_audit_columns.items():
+            if column_name not in audit_columns:
+                cursor.execute(
+                    f'ALTER TABLE admin_action_audit '
+                    f'ADD COLUMN {column_name} {column_type}'
+                )
+        cursor.execute(
+            '''
+            UPDATE admin_action_audit
+            SET
+                admin_username_snapshot = (
+                    SELECT username FROM user
+                    WHERE user.id = admin_action_audit.admin_id
+                ),
+                target_label_snapshot = CASE
+                    WHEN target_user_id IS NOT NULL THEN (
+                        SELECT username FROM user
+                        WHERE user.id = admin_action_audit.target_user_id
+                    )
+                    ELSE (
+                        SELECT title FROM product
+                        WHERE product.id = admin_action_audit.target_product_id
+                    )
+                END
+            WHERE
+                admin_username_snapshot IS NULL
+                OR target_label_snapshot IS NULL
+            '''
+        )
+    incomplete_product_snapshot = cursor.execute(
+        '''
+        SELECT 1
+        FROM product_moderation
+        WHERE
+            title_snapshot IS NULL
+            OR description_snapshot IS NULL
+            OR price_snapshot IS NULL
+            OR seller_id_snapshot IS NULL
+        LIMIT 1
+        '''
+    ).fetchone()
+    incomplete_audit_snapshot = cursor.execute(
+        '''
+        SELECT 1
+        FROM admin_action_audit
+        WHERE
+            admin_username_snapshot IS NULL
+            OR target_label_snapshot IS NULL
+        LIMIT 1
+        '''
+    ).fetchone()
+    if incomplete_product_snapshot or incomplete_audit_snapshot:
+        raise RuntimeError(
+            '기존 관리자 제재 기록의 Snapshot을 안전하게 복원할 수 없습니다.'
+        )
+
+
+def create_admin_role_audit_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS admin_role_audit (
+            id TEXT PRIMARY KEY,
+            operator_name TEXT NOT NULL
+                CHECK(length(trim(operator_name)) BETWEEN 1 AND 100)
+                CHECK(instr(operator_name, char(0)) = 0),
+            target_user_id TEXT NOT NULL,
+            target_username_snapshot TEXT NOT NULL,
+            action_type TEXT NOT NULL
+                CHECK(action_type IN ('admin_granted', 'admin_revoked')),
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH}
+                    AND {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (target_user_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_admin_role_audit_snapshot
+        BEFORE INSERT ON admin_role_audit
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.target_user_id
+                AND user.username = NEW.target_username_snapshot
+                AND (
+                    (
+                        NEW.action_type = 'admin_granted'
+                        AND user.is_admin = 1
+                    )
+                    OR (
+                        NEW.action_type = 'admin_revoked'
+                        AND user.is_admin = 0
+                    )
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid admin role audit snapshot');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_admin_role_audit_update
+        BEFORE UPDATE ON admin_role_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'admin role audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_admin_role_audit_delete
+        BEFORE DELETE ON admin_role_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'admin role audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS admin_role_audit_created
+        ON admin_role_audit (created_at DESC, id DESC)
+    """)
+
+
 def moderation_schema_is_current(cursor):
     required_columns = {
         'product_moderation': {
@@ -381,6 +622,10 @@ def moderation_schema_is_current(cursor):
             'admin_id',
             'reason',
             'created_at',
+            'title_snapshot',
+            'description_snapshot',
+            'price_snapshot',
+            'seller_id_snapshot',
         },
         'user_dormancy': {
             'user_id',
@@ -395,6 +640,8 @@ def moderation_schema_is_current(cursor):
             'target_user_id',
             'target_product_id',
             'reason',
+            'admin_username_snapshot',
+            'target_label_snapshot',
             'created_at',
         },
     }
@@ -477,6 +724,7 @@ def moderation_schema_is_current(cursor):
 
 def ensure_moderation_schema(cursor):
     create_moderation_tables(cursor)
+    migrate_moderation_metadata(cursor)
     if not moderation_schema_is_current(cursor):
         raise RuntimeError(
             '기존 관리자 제재 스키마가 현재 보안 요구사항과 호환되지 않습니다.'
@@ -499,6 +747,23 @@ def ensure_moderation_schema(cursor):
         )
         BEGIN
             SELECT RAISE(ABORT, 'administrator required');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_product_moderation_snapshot
+        BEFORE INSERT ON product_moderation
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM product
+            WHERE
+                product.id = NEW.product_id
+                AND product.title = NEW.title_snapshot
+                AND product.description = NEW.description_snapshot
+                AND product.price = NEW.price_snapshot
+                AND product.seller_id = NEW.seller_id_snapshot
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid product moderation snapshot');
         END
     """)
     cursor.execute("""
@@ -548,6 +813,41 @@ def ensure_moderation_schema(cursor):
         )
         BEGIN
             SELECT RAISE(ABORT, 'administrator required');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_admin_action_audit_snapshot
+        BEFORE INSERT ON admin_action_audit
+        WHEN
+            NOT EXISTS (
+                SELECT 1
+                FROM user
+                WHERE
+                    user.id = NEW.admin_id
+                    AND user.username = NEW.admin_username_snapshot
+            )
+            OR (
+                NEW.target_user_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user
+                    WHERE
+                        user.id = NEW.target_user_id
+                        AND user.username = NEW.target_label_snapshot
+                )
+            )
+            OR (
+                NEW.target_product_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM product
+                    WHERE
+                        product.id = NEW.target_product_id
+                        AND product.title = NEW.target_label_snapshot
+                )
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid admin audit snapshot');
         END
     """)
     cursor.execute("""
@@ -649,6 +949,51 @@ def ensure_direct_message_schema(cursor):
         CREATE INDEX IF NOT EXISTS direct_message_recipient_sender_created
         ON direct_message (recipient_id, sender_id, created_at, id)
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_block (
+            blocker_id TEXT NOT NULL,
+            blocked_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            PRIMARY KEY (blocker_id, blocked_id),
+            CHECK(blocker_id <> blocked_id),
+            FOREIGN KEY (blocker_id) REFERENCES user(id) ON DELETE RESTRICT,
+            FOREIGN KEY (blocked_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS user_block_blocked
+        ON user_block (blocked_id, blocker_id)
+    """)
+
+
+def create_security_rate_limit_table(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS security_rate_limit (
+            scope_type TEXT NOT NULL
+                CHECK(
+                    scope_type IN (
+                        'register_ip',
+                        'login_ip',
+                        'reauth_user',
+                        'reauth_ip',
+                        'admin_user',
+                        'product_user',
+                        'socket_ip'
+                    )
+                ),
+            scope_key TEXT NOT NULL,
+            window_started_at INTEGER NOT NULL
+                CHECK(typeof(window_started_at) = 'integer'),
+            attempt_count INTEGER NOT NULL
+                CHECK(typeof(attempt_count) = 'integer' AND attempt_count >= 1),
+            PRIMARY KEY (scope_type, scope_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS security_rate_limit_window
+        ON security_rate_limit (window_started_at)
+    """)
 
 
 def product_schema_is_current(cursor):
@@ -729,6 +1074,17 @@ def migrate_product_schema(cursor):
         migrated_products,
     )
     cursor.execute('DROP TABLE product_legacy_v1')
+
+
+def ensure_product_indexes(cursor):
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS product_seller_title
+        ON product (seller_id, title, id)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS product_title
+        ON product (title, id)
+    """)
 
 
 def create_report_table(cursor):
@@ -821,6 +1177,79 @@ def create_report_rate_limit_table(cursor):
     """)
 
 
+def create_report_review_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS report_review (
+            report_id TEXT PRIMARY KEY,
+            admin_id TEXT NOT NULL,
+            admin_username_snapshot TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('resolved', 'dismissed')),
+            note TEXT NOT NULL
+                CHECK(length(trim(note)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH}
+                    AND {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(note, char(0)) = 0),
+            reviewed_at INTEGER NOT NULL
+                CHECK(typeof(reviewed_at) = 'integer' AND reviewed_at >= 0),
+            FOREIGN KEY (report_id) REFERENCES report(id) ON DELETE RESTRICT,
+            FOREIGN KEY (admin_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_report_review_admin
+        BEFORE INSERT ON report_review
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.admin_id
+                AND user.is_admin = 1
+                AND user.deleted_at IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM user_dormancy
+                    WHERE user_dormancy.user_id = user.id
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'administrator required');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_report_review_snapshot
+        BEFORE INSERT ON report_review
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.admin_id
+                AND user.username = NEW.admin_username_snapshot
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid report review snapshot');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_report_review_update
+        BEFORE UPDATE ON report_review
+        BEGIN
+            SELECT RAISE(ABORT, 'report review is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_report_review_delete
+        BEFORE DELETE ON report_review
+        BEGIN
+            SELECT RAISE(ABORT, 'report review is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS report_review_status_time
+        ON report_review (status, reviewed_at DESC, report_id)
+    """)
+
+
 def ensure_report_schema_objects(cursor):
     cursor.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS report_unique_user_target
@@ -835,6 +1264,16 @@ def ensure_report_schema_objects(cursor):
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS report_reporter_created_at
         ON report (reporter_id, created_at)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS report_target_user_created
+        ON report (target_user_id, created_at DESC)
+        WHERE target_type = 'user'
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS report_target_product_created
+        ON report (target_product_id, created_at DESC)
+        WHERE target_type = 'product'
     """)
     cursor.execute(f"""
         CREATE TRIGGER IF NOT EXISTS prevent_report_rate_limit_bypass
@@ -1227,14 +1666,18 @@ def init_db():
         add_user_security_columns(cursor)
         migrate_plaintext_passwords(cursor)
         migrate_product_schema(cursor)
+        ensure_product_indexes(cursor)
         ensure_moderation_schema(cursor)
+        create_admin_role_audit_table(cursor)
         ensure_direct_message_schema(cursor)
+        create_security_rate_limit_table(cursor)
         # 상품 스키마 마이그레이션 이후 신고 외래키를 생성한다.
         create_report_table(cursor)
         create_report_audit_table(cursor)
         migrate_report_schema(cursor)
         migrate_report_audit_schema(cursor)
         create_report_rate_limit_table(cursor)
+        create_report_review_table(cursor)
         ensure_report_schema_objects(cursor)
         db.commit()
 
@@ -1246,8 +1689,11 @@ def normalize_username(value):
 def validate_username(username):
     if not USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH:
         return f'사용자명은 {USERNAME_MIN_LENGTH}~{USERNAME_MAX_LENGTH}자여야 합니다.'
-    if not all(character.isalnum() or character in '_.-' for character in username):
-        return '사용자명에는 문자, 숫자, 밑줄, 마침표, 하이픈만 사용할 수 있습니다.'
+    if re.fullmatch(r'[A-Za-z0-9_.-]+', username) is None:
+        return (
+            '사용자명에는 영문자, ASCII 숫자, 밑줄, 마침표, '
+            '하이픈만 사용할 수 있습니다.'
+        )
     return None
 
 
@@ -1260,13 +1706,22 @@ def validate_password(password):
         return '비밀번호에는 문자가 하나 이상 포함되어야 합니다.'
     if not any(character.isdigit() for character in password):
         return '비밀번호에는 숫자가 하나 이상 포함되어야 합니다.'
+    if password.casefold() in {
+        common_password.casefold()
+        for common_password in COMMON_PASSWORDS
+    }:
+        return '추측하기 쉬운 비밀번호는 사용할 수 없습니다.'
     return None
 
 
 def validate_bio(bio):
     if len(bio) > BIO_MAX_LENGTH:
         return f'소개글은 {BIO_MAX_LENGTH}자 이하여야 합니다.'
-    if '\x00' in bio:
+    if any(
+        unicodedata.category(character).startswith('C')
+        and character not in {'\n', '\t'}
+        for character in bio
+    ):
         return '소개글에 허용되지 않는 문자가 포함되어 있습니다.'
     return None
 
@@ -1300,7 +1755,11 @@ def validate_product_input(raw_title, raw_description, raw_price):
             f'상품 설명은 {PRODUCT_DESCRIPTION_MIN_LENGTH}~'
             f'{PRODUCT_DESCRIPTION_MAX_LENGTH}자여야 합니다.'
         )
-    if '\x00' in description:
+    if any(
+        unicodedata.category(character).startswith('C')
+        and character not in {'\n', '\t'}
+        for character in description
+    ):
         return (
             None,
             None,
@@ -1390,6 +1849,22 @@ def add_admin_action_audit(
     target_user_id=None,
     target_product_id=None,
 ):
+    admin = cursor.execute(
+        'SELECT username FROM user WHERE id = ?',
+        (admin_id,),
+    ).fetchone()
+    if target_user_id is not None:
+        target = cursor.execute(
+            'SELECT username AS label FROM user WHERE id = ?',
+            (target_user_id,),
+        ).fetchone()
+    else:
+        target = cursor.execute(
+            'SELECT title AS label FROM product WHERE id = ?',
+            (target_product_id,),
+        ).fetchone()
+    if admin is None or target is None:
+        raise sqlite3.IntegrityError('invalid admin audit target')
     cursor.execute(
         '''
         INSERT INTO admin_action_audit (
@@ -1399,9 +1874,11 @@ def add_admin_action_audit(
             target_user_id,
             target_product_id,
             reason,
+            admin_username_snapshot,
+            target_label_snapshot,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''',
         (
             str(uuid.uuid4()),
@@ -1410,6 +1887,8 @@ def add_admin_action_audit(
             target_user_id,
             target_product_id,
             reason,
+            admin['username'],
+            target['label'],
             created_at,
         ),
     )
@@ -1428,6 +1907,80 @@ def get_client_ip_hash():
     ).hexdigest()
 
 
+def consume_security_rate_limit(
+    cursor,
+    scope_type,
+    scope_key,
+    maximum_attempts,
+    window_seconds,
+    now,
+):
+    cursor.execute(
+        '''
+        DELETE FROM security_rate_limit
+        WHERE window_started_at < ?
+        ''',
+        (now - RATE_LIMIT_RETENTION_SECONDS,),
+    )
+    row = cursor.execute(
+        '''
+        SELECT window_started_at, attempt_count
+        FROM security_rate_limit
+        WHERE scope_type = ? AND scope_key = ?
+        ''',
+        (scope_type, scope_key),
+    ).fetchone()
+    if row is None:
+        cursor.execute(
+            '''
+            INSERT INTO security_rate_limit (
+                scope_type,
+                scope_key,
+                window_started_at,
+                attempt_count
+            )
+            VALUES (?, ?, ?, 1)
+            ''',
+            (scope_type, scope_key, now),
+        )
+        return True
+    window_expired = (
+        now - row['window_started_at'] >= window_seconds
+        or now < row['window_started_at']
+    )
+    if window_expired:
+        cursor.execute(
+            '''
+            UPDATE security_rate_limit
+            SET window_started_at = ?, attempt_count = 1
+            WHERE scope_type = ? AND scope_key = ?
+            ''',
+            (now, scope_type, scope_key),
+        )
+        return True
+    if row['attempt_count'] >= maximum_attempts:
+        return False
+    cursor.execute(
+        '''
+        UPDATE security_rate_limit
+        SET attempt_count = attempt_count + 1
+        WHERE scope_type = ? AND scope_key = ?
+        ''',
+        (scope_type, scope_key),
+    )
+    return True
+
+
+def reset_security_rate_limit(cursor, scope_type, scope_key):
+    cursor.execute(
+        '''
+        DELETE FROM security_rate_limit
+        WHERE scope_type = ? AND scope_key = ?
+        ''',
+        (scope_type, scope_key),
+    )
+
+
 def consume_report_rate_limit(
     cursor,
     scope_type,
@@ -1435,6 +1988,13 @@ def consume_report_rate_limit(
     maximum_attempts,
     now,
 ):
+    cursor.execute(
+        '''
+        DELETE FROM report_rate_limit
+        WHERE window_started_at < ?
+        ''',
+        (now - RATE_LIMIT_RETENTION_SECONDS,),
+    )
     row = cursor.execute(
         '''
         SELECT window_started_at, attempt_count, blocked_logged
@@ -1586,6 +2146,49 @@ def generate_csrf_token():
 
 
 app.jinja_env.globals['csrf_token'] = generate_csrf_token
+
+
+def get_csp_nonce():
+    return g.csp_nonce
+
+
+app.jinja_env.globals['csp_nonce'] = get_csp_nonce
+
+
+@app.before_request
+def prepare_request_security():
+    g.csp_nonce = secrets.token_urlsafe(18)
+
+
+@app.after_request
+def apply_security_headers(response):
+    nonce = getattr(g, 'csp_nonce', None) or secrets.token_urlsafe(18)
+    content_security_policy = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}' https://cdnjs.cloudflare.com; "
+        f"style-src 'self' 'nonce-{nonce}'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+    response.headers['Content-Security-Policy'] = content_security_policy
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = (
+        'camera=(), microphone=(), geolocation=()'
+    )
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    if request.is_secure:
+        response.headers['Strict-Transport-Security'] = (
+            'max-age=31536000; includeSubDomains'
+        )
+    return response
 
 
 def csrf_protected(view):
@@ -1754,6 +2357,119 @@ def normalize_uuid_identifier(value):
     return normalized_value
 
 
+def get_page_number(parameter='page'):
+    raw_page = request.args.get(parameter, '1')
+    if re.fullmatch(r'[1-9][0-9]*', raw_page) is None:
+        abort(400)
+    page = int(raw_page)
+    if page > MAX_PAGE_NUMBER:
+        abort(400)
+    return page
+
+
+def build_pagination(total_items, page, page_size=PAGE_SIZE):
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    if page > total_pages and total_items:
+        abort(404)
+    return {
+        'page': page,
+        'page_size': page_size,
+        'total_items': total_items,
+        'total_pages': total_pages,
+        'has_previous': page > 1,
+        'has_next': page < total_pages,
+    }
+
+
+def verify_sensitive_password(candidate):
+    if len(candidate) > PASSWORD_MAX_LENGTH:
+        return False
+    now = int(time.time())
+    db = get_db()
+    cursor = db.cursor()
+    user_key = g.current_user['id']
+    ip_key = get_client_ip_hash()
+    user_allowed = consume_security_rate_limit(
+        cursor,
+        'reauth_user',
+        user_key,
+        REAUTH_RATE_LIMIT,
+        REAUTH_RATE_WINDOW_SECONDS,
+        now,
+    )
+    ip_allowed = consume_security_rate_limit(
+        cursor,
+        'reauth_ip',
+        ip_key,
+        REAUTH_RATE_LIMIT,
+        REAUTH_RATE_WINDOW_SECONDS,
+        now,
+    )
+    if not user_allowed or not ip_allowed:
+        db.commit()
+        abort(429)
+    if not verify_password(g.current_user['password'], candidate):
+        db.commit()
+        return False
+    reset_security_rate_limit(cursor, 'reauth_user', user_key)
+    reset_security_rate_limit(cursor, 'reauth_ip', ip_key)
+    db.commit()
+    session['sensitive_authenticated_at'] = now
+    return True
+
+
+def enforce_admin_action_authorization():
+    now = int(time.time())
+    submitted_password = request.form.get('current_password', '')
+    recent_authentication = session.get(
+        'sensitive_authenticated_at',
+        session.get('authenticated_at'),
+    )
+    recent_authentication_is_valid = (
+        isinstance(recent_authentication, int)
+        and now >= recent_authentication
+        and now - recent_authentication <= ADMIN_RECENT_AUTH_SECONDS
+    )
+    if submitted_password:
+        if not verify_sensitive_password(submitted_password):
+            flash('현재 비밀번호가 올바르지 않습니다.')
+            return False
+    elif not recent_authentication_is_valid:
+        flash('관리 작업을 계속하려면 현재 비밀번호를 확인해주세요.')
+        return False
+    db = get_db()
+    allowed = consume_security_rate_limit(
+        db.cursor(),
+        'admin_user',
+        g.current_user['id'],
+        ADMIN_ACTION_RATE_LIMIT,
+        ADMIN_ACTION_RATE_WINDOW_SECONDS,
+        now,
+    )
+    db.commit()
+    if not allowed:
+        abort(429)
+    return True
+
+
+def users_are_blocked(first_user_id, second_user_id):
+    return get_db().execute(
+        '''
+        SELECT 1
+        FROM user_block
+        WHERE
+            (blocker_id = ? AND blocked_id = ?)
+            OR (blocker_id = ? AND blocked_id = ?)
+        ''',
+        (
+            first_user_id,
+            second_user_id,
+            second_user_id,
+            first_user_id,
+        ),
+    ).fetchone() is not None
+
+
 def get_chat_recipient_or_404(recipient_id):
     normalized_recipient_id = normalize_uuid_identifier(recipient_id)
     if normalized_recipient_id is None:
@@ -1804,6 +2520,18 @@ def register_post():
 
     db = get_db()
     cursor = db.cursor()
+    now = int(time.time())
+    registration_allowed = consume_security_rate_limit(
+        cursor,
+        'register_ip',
+        get_client_ip_hash(),
+        REGISTER_IP_RATE_LIMIT,
+        REGISTER_RATE_WINDOW_SECONDS,
+        now,
+    )
+    db.commit()
+    if not registration_allowed:
+        abort(429)
     password_hash = password_hasher.hash(password)
     cursor.execute('SELECT id FROM user WHERE username = ?', (username,))
     if cursor.fetchone() is not None:
@@ -1844,6 +2572,19 @@ def login_post():
 
     db = get_db()
     cursor = db.cursor()
+    source_ip_hash = get_client_ip_hash()
+    now = int(time.time())
+    login_allowed = consume_security_rate_limit(
+        cursor,
+        'login_ip',
+        source_ip_hash,
+        LOGIN_IP_RATE_LIMIT,
+        LOGIN_RATE_WINDOW_SECONDS,
+        now,
+    )
+    if not login_allowed:
+        db.commit()
+        abort(429)
     cursor.execute(
         '''
         SELECT *
@@ -1860,20 +2601,17 @@ def login_post():
         (username,),
     )
     user = cursor.fetchone()
-    now = int(time.time())
 
     if user is None:
         verify_password(DUMMY_PASSWORD_HASH, password)
+        db.commit()
         flash('아이디 또는 비밀번호가 올바르지 않습니다.')
         return redirect(url_for('login'))
 
-    if user['locked_until'] is not None and user['locked_until'] > now:
-        verify_password(DUMMY_PASSWORD_HASH, password)
-        flash('아이디 또는 비밀번호가 올바르지 않습니다.')
-        return redirect(url_for('login'))
-
-    if not verify_password(user['password'], password):
-        record_failed_login(cursor, user, now)
+    password_is_valid = verify_password(user['password'], password)
+    if not password_is_valid:
+        if user['locked_until'] is None or user['locked_until'] <= now:
+            record_failed_login(cursor, user, now)
         db.commit()
         flash('아이디 또는 비밀번호가 올바르지 않습니다.')
         return redirect(url_for('login'))
@@ -1899,6 +2637,7 @@ def login_post():
     session['session_version'] = user['session_version']
     session['authenticated_at'] = now
     session['last_activity'] = now
+    session['sensitive_authenticated_at'] = now
     flash('로그인 성공!')
     return redirect(url_for('dashboard'))
 
@@ -1914,15 +2653,9 @@ def logout():
 # 공개 상품 목록
 @app.route('/products')
 def products():
-    public_products = get_db().execute(
-        '''
-        SELECT
-            product.id,
-            product.title,
-            product.description,
-            product.price,
-            product.seller_id,
-            seller.username AS seller_username
+    page = get_page_number()
+    db = get_db()
+    product_filter = '''
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
         WHERE
@@ -1937,19 +2670,38 @@ def products():
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
             )
+    '''
+    total_items = db.execute(
+        f'SELECT COUNT(*) {product_filter}'
+    ).fetchone()[0]
+    pagination = build_pagination(total_items, page)
+    public_products = db.execute(
+        f'''
+        SELECT
+            product.id,
+            product.title,
+            product.price,
+            seller.username AS seller_username
+        {product_filter}
         ORDER BY product.title, product.id
-        '''
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (page - 1) * PAGE_SIZE),
     ).fetchall()
-    return render_template('products.html', products=public_products)
+    return render_template(
+        'products.html',
+        products=public_products,
+        pagination=pagination,
+    )
 
 
 # 대시보드: 로그인 사용자 정보와 공개 상품 리스트 표시
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    public_products = get_db().execute(
-        '''
-        SELECT product.*
+    page = get_page_number()
+    db = get_db()
+    product_filter = '''
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
         WHERE
@@ -1964,12 +2716,24 @@ def dashboard():
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
             )
+    '''
+    total_items = db.execute(
+        f'SELECT COUNT(*) {product_filter}'
+    ).fetchone()[0]
+    pagination = build_pagination(total_items, page)
+    public_products = db.execute(
+        f'''
+        SELECT product.id, product.title, product.price
+        {product_filter}
         ORDER BY product.title, product.id
-        '''
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (page - 1) * PAGE_SIZE),
     ).fetchall()
     return render_template(
         'dashboard.html',
         products=public_products,
+        pagination=pagination,
         user=g.current_user,
     )
 
@@ -1990,10 +2754,7 @@ def profile_post():
     if validation_error:
         flash(validation_error)
         return redirect(url_for('profile'))
-    if (
-        len(current_password) > PASSWORD_MAX_LENGTH
-        or not verify_password(g.current_user['password'], current_password)
-    ):
+    if not verify_sensitive_password(current_password):
         flash('현재 비밀번호가 올바르지 않습니다.')
         return redirect(url_for('profile'))
 
@@ -2015,10 +2776,7 @@ def update_password():
     new_password = request.form.get('new_password', '')
     confirm_password = request.form.get('confirm_password', '')
 
-    if (
-        len(current_password) > PASSWORD_MAX_LENGTH
-        or not verify_password(g.current_user['password'], current_password)
-    ):
+    if not verify_sensitive_password(current_password):
         flash('현재 비밀번호가 올바르지 않습니다.')
         return redirect(url_for('profile'))
 
@@ -2068,10 +2826,10 @@ def update_password():
 def delete_account():
     current_password = request.form.get('current_password', '')
     confirmation = request.form.get('confirmation', '')
-    if (
-        len(current_password) > PASSWORD_MAX_LENGTH
-        or not verify_password(g.current_user['password'], current_password)
-    ):
+    if g.current_user['is_admin'] == 1:
+        flash('관리자 권한을 해제한 뒤 회원 탈퇴를 진행해주세요.')
+        return redirect(url_for('profile'))
+    if not verify_sensitive_password(current_password):
         flash('현재 비밀번호가 올바르지 않습니다.')
         return redirect(url_for('profile'))
     if not hmac.compare_digest(
@@ -2143,9 +2901,26 @@ def new_product_post():
         return redirect(url_for('new_product'))
 
     db = get_db()
+    cursor = db.cursor()
+    now = int(time.time())
+    creation_allowed = consume_security_rate_limit(
+        cursor,
+        'product_user',
+        g.current_user['id'],
+        PRODUCT_CREATE_RATE_LIMIT,
+        PRODUCT_CREATE_RATE_WINDOW_SECONDS,
+        now,
+    )
+    product_count = cursor.execute(
+        'SELECT COUNT(*) FROM product WHERE seller_id = ?',
+        (g.current_user['id'],),
+    ).fetchone()[0]
+    db.commit()
+    if not creation_allowed or product_count >= MAX_PRODUCTS_PER_USER:
+        abort(429)
     product_id = str(uuid.uuid4())
     try:
-        db.execute(
+        cursor.execute(
             '''
             INSERT INTO product (id, title, description, price, seller_id)
             VALUES (?, ?, ?, ?, ?)
@@ -2165,9 +2940,9 @@ def new_product_post():
 @app.route('/products/manage')
 @login_required
 def manage_products():
-    products = get_db().execute(
-        '''
-        SELECT id, title, description, price, seller_id
+    page = get_page_number()
+    db = get_db()
+    product_filter = '''
         FROM product
         WHERE
             seller_id = ?
@@ -2176,11 +2951,30 @@ def manage_products():
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
             )
-        ORDER BY title, id
-        ''',
+    '''
+    total_items = db.execute(
+        f'SELECT COUNT(*) {product_filter}',
         (g.current_user['id'],),
+    ).fetchone()[0]
+    pagination = build_pagination(total_items, page)
+    products = db.execute(
+        f'''
+        SELECT id, title, description, price, seller_id
+        {product_filter}
+        ORDER BY title, id
+        LIMIT ? OFFSET ?
+        ''',
+        (
+            g.current_user['id'],
+            PAGE_SIZE,
+            (page - 1) * PAGE_SIZE,
+        ),
     ).fetchall()
-    return render_template('manage_products.html', products=products)
+    return render_template(
+        'manage_products.html',
+        products=products,
+        pagination=pagination,
+    )
 
 
 # 상품 상세보기
@@ -2234,7 +3028,14 @@ def edit_product_post(product):
             '''
             UPDATE product
             SET title = ?, description = ?, price = ?
-            WHERE id = ? AND seller_id = ?
+            WHERE
+                id = ?
+                AND seller_id = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM product_moderation
+                    WHERE product_moderation.product_id = product.id
+                )
             ''',
             (
                 title,
@@ -2286,25 +3087,13 @@ def delete_product(product_id):
 @admin_required
 def admin_moderation():
     db = get_db()
-    products = db.execute(
+    product_page = get_page_number('product_page')
+    user_page = get_page_number('user_page')
+    report_page = get_page_number('report_page')
+    audit_page = get_page_number('audit_page')
+    product_count = db.execute(
         '''
-        SELECT
-            product.id,
-            product.title,
-            product.description,
-            product.price,
-            product.seller_id,
-            seller.username AS seller_username,
-            EXISTS (
-                SELECT 1
-                FROM user_dormancy
-                WHERE user_dormancy.user_id = seller.id
-            ) AS seller_is_dormant,
-            (
-                SELECT COUNT(*)
-                FROM report
-                WHERE report.target_product_id = product.id
-            ) AS report_count
+        SELECT COUNT(*)
         FROM product
         JOIN user AS seller ON seller.id = product.seller_id
         WHERE
@@ -2314,28 +3103,107 @@ def admin_moderation():
                 FROM product_moderation
                 WHERE product_moderation.product_id = product.id
             )
-        ORDER BY report_count DESC, product.title, product.id
         '''
+    ).fetchone()[0]
+    product_pagination = build_pagination(product_count, product_page)
+    products = db.execute(
+        '''
+        WITH report_counts AS (
+            SELECT target_product_id, COUNT(*) AS report_count
+            FROM report
+            WHERE target_type = 'product'
+            GROUP BY target_product_id
+        )
+        SELECT
+            product.id,
+            product.title,
+            product.price,
+            seller.username AS seller_username,
+            EXISTS (
+                SELECT 1
+                FROM user_dormancy
+                WHERE user_dormancy.user_id = seller.id
+            ) AS seller_is_dormant,
+            COALESCE(report_counts.report_count, 0) AS report_count
+        FROM product
+        JOIN user AS seller ON seller.id = product.seller_id
+        LEFT JOIN report_counts
+            ON report_counts.target_product_id = product.id
+        WHERE
+            seller.deleted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM product_moderation
+                WHERE product_moderation.product_id = product.id
+            )
+        ORDER BY report_count DESC, product.title, product.id
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (product_page - 1) * PAGE_SIZE),
     ).fetchall()
+    user_count = db.execute(
+        'SELECT COUNT(*) FROM user WHERE deleted_at IS NULL'
+    ).fetchone()[0]
+    user_pagination = build_pagination(user_count, user_page)
     users = db.execute(
         '''
+        WITH report_counts AS (
+            SELECT target_user_id, COUNT(*) AS report_count
+            FROM report
+            WHERE target_type = 'user'
+            GROUP BY target_user_id
+        )
         SELECT
             user.id,
             user.username,
             user.is_admin,
             user_dormancy.created_at AS dormant_at,
             user_dormancy.reason AS dormant_reason,
-            (
-                SELECT COUNT(*)
-                FROM report
-                WHERE report.target_user_id = user.id
-            ) AS report_count
+            COALESCE(report_counts.report_count, 0) AS report_count
         FROM user
         LEFT JOIN user_dormancy ON user_dormancy.user_id = user.id
+        LEFT JOIN report_counts ON report_counts.target_user_id = user.id
         WHERE user.deleted_at IS NULL
         ORDER BY report_count DESC, user.username, user.id
-        '''
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (user_page - 1) * PAGE_SIZE),
     ).fetchall()
+    report_count = db.execute('SELECT COUNT(*) FROM report').fetchone()[0]
+    report_pagination = build_pagination(report_count, report_page)
+    reports = db.execute(
+        '''
+        SELECT
+            report.id,
+            report.target_type,
+            report.reason,
+            report.created_at,
+            reporter.username AS reporter_username,
+            target_user.username AS target_username,
+            target_product.title AS target_product_title,
+            COALESCE(report_review.status, 'pending') AS review_status,
+            report_review.note AS review_note,
+            report_review.reviewed_at,
+            report_review.admin_username_snapshot AS reviewer_username
+        FROM report
+        JOIN user AS reporter ON reporter.id = report.reporter_id
+        LEFT JOIN user AS target_user
+            ON target_user.id = report.target_user_id
+        LEFT JOIN product AS target_product
+            ON target_product.id = report.target_product_id
+        LEFT JOIN report_review ON report_review.report_id = report.id
+        ORDER BY
+            CASE WHEN report_review.report_id IS NULL THEN 0 ELSE 1 END,
+            report.created_at DESC,
+            report.id DESC
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (report_page - 1) * PAGE_SIZE),
+    ).fetchall()
+    audit_count = db.execute(
+        'SELECT COUNT(*) FROM admin_action_audit'
+    ).fetchone()[0]
+    audit_pagination = build_pagination(audit_count, audit_page)
     audit_events = db.execute(
         '''
         SELECT
@@ -2343,27 +3211,33 @@ def admin_moderation():
             admin_action_audit.action_type,
             admin_action_audit.reason,
             admin_action_audit.created_at,
-            administrator.username AS admin_username,
-            target_user.username AS target_username,
-            target_product.title AS target_product_title
+            admin_action_audit.admin_username_snapshot AS admin_username,
+            CASE
+                WHEN admin_action_audit.target_user_id IS NOT NULL
+                THEN admin_action_audit.target_label_snapshot
+            END AS target_username,
+            CASE
+                WHEN admin_action_audit.target_product_id IS NOT NULL
+                THEN admin_action_audit.target_label_snapshot
+            END AS target_product_title
         FROM admin_action_audit
-        JOIN user AS administrator
-            ON administrator.id = admin_action_audit.admin_id
-        LEFT JOIN user AS target_user
-            ON target_user.id = admin_action_audit.target_user_id
-        LEFT JOIN product AS target_product
-            ON target_product.id = admin_action_audit.target_product_id
         ORDER BY
             admin_action_audit.created_at DESC,
             admin_action_audit.id DESC
-        LIMIT 100
-        '''
+        LIMIT ? OFFSET ?
+        ''',
+        (PAGE_SIZE, (audit_page - 1) * PAGE_SIZE),
     ).fetchall()
     return render_template(
         'admin_moderation.html',
         products=products,
         users=users,
+        reports=reports,
         audit_events=audit_events,
+        product_pagination=product_pagination,
+        user_pagination=user_pagination,
+        report_pagination=report_pagination,
+        audit_pagination=audit_pagination,
     )
 
 
@@ -2380,12 +3254,14 @@ def admin_remove_product(product_id):
     if validation_error:
         flash(validation_error)
         return redirect(url_for('admin_moderation'))
+    if not enforce_admin_action_authorization():
+        return redirect(url_for('admin_moderation'))
 
     db = get_db()
     cursor = db.cursor()
     product = cursor.execute(
         '''
-        SELECT id
+        SELECT id, title, description, price, seller_id
         FROM product
         WHERE
             id = ?
@@ -2408,15 +3284,23 @@ def admin_remove_product(product_id):
                 product_id,
                 admin_id,
                 reason,
-                created_at
+                created_at,
+                title_snapshot,
+                description_snapshot,
+                price_snapshot,
+                seller_id_snapshot
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 product['id'],
                 g.current_user['id'],
                 reason,
                 now,
+                product['title'],
+                product['description'],
+                product['price'],
+                product['seller_id'],
             ),
         )
         add_admin_action_audit(
@@ -2448,6 +3332,8 @@ def admin_dormant_user(user_id):
     )
     if validation_error:
         flash(validation_error)
+        return redirect(url_for('admin_moderation'))
+    if not enforce_admin_action_authorization():
         return redirect(url_for('admin_moderation'))
 
     db = get_db()
@@ -2537,6 +3423,8 @@ def admin_reactivate_user(user_id):
     if validation_error:
         flash(validation_error)
         return redirect(url_for('admin_moderation'))
+    if not enforce_admin_action_authorization():
+        return redirect(url_for('admin_moderation'))
 
     db = get_db()
     cursor = db.cursor()
@@ -2580,13 +3468,76 @@ def admin_reactivate_user(user_id):
     return redirect(url_for('admin_moderation'))
 
 
+@app.route('/admin/reports/<report_id>/review', methods=['POST'])
+@admin_required
+@csrf_protected
+def admin_review_report(report_id):
+    normalized_report_id = normalize_uuid_identifier(report_id)
+    if normalized_report_id is None:
+        abort(404)
+    status = request.form.get('status', '').strip().lower()
+    if status not in {'resolved', 'dismissed'}:
+        abort(400)
+    note, validation_error = validate_moderation_reason(
+        request.form.get('reason', '')
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('admin_moderation'))
+    if not enforce_admin_action_authorization():
+        return redirect(url_for('admin_moderation'))
+
+    db = get_db()
+    cursor = db.cursor()
+    report_row = cursor.execute(
+        '''
+        SELECT report.id
+        FROM report
+        LEFT JOIN report_review ON report_review.report_id = report.id
+        WHERE report.id = ? AND report_review.report_id IS NULL
+        ''',
+        (normalized_report_id,),
+    ).fetchone()
+    if report_row is None:
+        abort(404)
+    try:
+        cursor.execute(
+            '''
+            INSERT INTO report_review (
+                report_id,
+                admin_id,
+                admin_username_snapshot,
+                status,
+                note,
+                reviewed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                report_row['id'],
+                g.current_user['id'],
+                g.current_user['username'],
+                status,
+                note,
+                int(time.time()),
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+
+    flash('신고 검토 상태를 저장했습니다.')
+    return redirect(url_for('admin_moderation'))
+
+
 # 1대1 채팅 사용자 목록
 @app.route('/chat')
 @login_required
 def direct_chat_users():
-    users = get_db().execute(
-        '''
-        SELECT id, username
+    page = get_page_number()
+    db = get_db()
+    user_filter = '''
         FROM user
         WHERE
             id <> ?
@@ -2596,12 +3547,51 @@ def direct_chat_users():
                 FROM user_dormancy
                 WHERE user_dormancy.user_id = user.id
             )
+    '''
+    total_items = db.execute(
+        f'SELECT COUNT(*) {user_filter}',
+        (g.current_user['id'],),
+    ).fetchone()[0]
+    pagination = build_pagination(
+        total_items,
+        page,
+        DIRECT_CHAT_USER_LIST_LIMIT,
+    )
+    users = db.execute(
+        f'''
+        SELECT
+            id,
+            username,
+            EXISTS (
+                SELECT 1
+                FROM user_block
+                WHERE
+                    (
+                        blocker_id = ?
+                        AND blocked_id = user.id
+                    )
+                    OR (
+                        blocker_id = user.id
+                        AND blocked_id = ?
+                    )
+            ) AS is_blocked
+        {user_filter}
         ORDER BY username, id
-        LIMIT ?
+        LIMIT ? OFFSET ?
         ''',
-        (g.current_user['id'], DIRECT_CHAT_USER_LIST_LIMIT),
+        (
+            g.current_user['id'],
+            g.current_user['id'],
+            g.current_user['id'],
+            DIRECT_CHAT_USER_LIST_LIMIT,
+            (page - 1) * DIRECT_CHAT_USER_LIST_LIMIT,
+        ),
     ).fetchall()
-    return render_template('direct_chat_users.html', users=users)
+    return render_template(
+        'direct_chat_users.html',
+        users=users,
+        pagination=pagination,
+    )
 
 
 # 1대1 채팅 대화 화면
@@ -2609,15 +3599,9 @@ def direct_chat_users():
 @login_required
 def direct_chat(recipient_id):
     recipient = get_chat_recipient_or_404(recipient_id)
-    messages = get_db().execute(
-        '''
-        SELECT
-            direct_message.id,
-            direct_message.sender_id,
-            direct_message.recipient_id,
-            direct_message.message,
-            direct_message.created_at,
-            sender.username AS sender_username
+    page = get_page_number()
+    db = get_db()
+    conversation_filter = '''
         FROM direct_message
         JOIN user AS sender ON sender.id = direct_message.sender_id
         WHERE
@@ -2630,23 +3614,100 @@ def direct_chat(recipient_id):
                 direct_message.sender_id = ?
                 AND direct_message.recipient_id = ?
             )
+    '''
+    parameters = (
+        g.current_user['id'],
+        recipient['id'],
+        recipient['id'],
+        g.current_user['id'],
+    )
+    total_items = db.execute(
+        f'SELECT COUNT(*) {conversation_filter}',
+        parameters,
+    ).fetchone()[0]
+    pagination = build_pagination(
+        total_items,
+        page,
+        DIRECT_CHAT_HISTORY_LIMIT,
+    )
+    messages = db.execute(
+        f'''
+        SELECT
+            direct_message.id,
+            direct_message.sender_id,
+            direct_message.recipient_id,
+            direct_message.message,
+            direct_message.created_at,
+            sender.username AS sender_username
+        {conversation_filter}
         ORDER BY direct_message.created_at DESC, direct_message.id DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
+        ''',
+        (
+            *parameters,
+            DIRECT_CHAT_HISTORY_LIMIT,
+            (page - 1) * DIRECT_CHAT_HISTORY_LIMIT,
+        ),
+    ).fetchall()
+    blocked_by_current_user = db.execute(
+        '''
+        SELECT 1
+        FROM user_block
+        WHERE blocker_id = ? AND blocked_id = ?
         ''',
         (
             g.current_user['id'],
             recipient['id'],
-            recipient['id'],
-            g.current_user['id'],
-            DIRECT_CHAT_HISTORY_LIMIT,
         ),
-    ).fetchall()
+    ).fetchone() is not None
     return render_template(
         'direct_chat.html',
         recipient=recipient,
         messages=list(reversed(messages)),
         user=g.current_user,
+        is_blocked=users_are_blocked(
+            g.current_user['id'],
+            recipient['id'],
+        ),
+        blocked_by_current_user=blocked_by_current_user,
+        pagination=pagination,
     )
+
+
+@app.route('/chat/<recipient_id>/block', methods=['POST'])
+@login_required
+@csrf_protected
+def block_chat_user(recipient_id):
+    recipient = get_chat_recipient_or_404(recipient_id)
+    db = get_db()
+    db.execute(
+        '''
+        INSERT OR IGNORE INTO user_block (blocker_id, blocked_id, created_at)
+        VALUES (?, ?, ?)
+        ''',
+        (g.current_user['id'], recipient['id'], int(time.time())),
+    )
+    db.commit()
+    flash('사용자를 차단했습니다.')
+    return redirect(url_for('direct_chat', recipient_id=recipient['id']))
+
+
+@app.route('/chat/<recipient_id>/unblock', methods=['POST'])
+@login_required
+@csrf_protected
+def unblock_chat_user(recipient_id):
+    recipient = get_chat_recipient_or_404(recipient_id)
+    db = get_db()
+    db.execute(
+        '''
+        DELETE FROM user_block
+        WHERE blocker_id = ? AND blocked_id = ?
+        ''',
+        (g.current_user['id'], recipient['id']),
+    )
+    db.commit()
+    flash('사용자 차단을 해제했습니다.')
+    return redirect(url_for('direct_chat', recipient_id=recipient['id']))
 
 
 # 신고하기
@@ -3004,6 +4065,26 @@ def handle_socket_connect(auth=None):
     user = get_authenticated_socket_user()
     if user is None:
         return False
+    db = get_db()
+    connection_allowed = consume_security_rate_limit(
+        db.cursor(),
+        'socket_ip',
+        get_client_ip_hash(),
+        SOCKET_CONNECT_IP_RATE_LIMIT,
+        SOCKET_CONNECT_RATE_WINDOW_SECONDS,
+        int(time.time()),
+    )
+    db.commit()
+    if not connection_allowed:
+        return False
+    current_connections = list(
+        socketio.server.manager.get_participants(
+            '/',
+            direct_chat_room(user['id']),
+        )
+    )
+    if len(current_connections) >= SOCKET_MAX_CONNECTIONS_PER_USER:
+        return False
     join_room(direct_chat_room(user['id']))
     return True
 
@@ -3085,6 +4166,12 @@ def handle_send_direct_message_event(data):
         return reject_chat_event(
             'invalid_message',
             '메시지 형식을 확인해주세요.',
+            event_name='direct_chat_error',
+        )
+    if users_are_blocked(user['id'], recipient_id):
+        return reject_chat_event(
+            'recipient_blocked',
+            '차단 상태에서는 메시지를 보낼 수 없습니다.',
             event_name='direct_chat_error',
         )
 
@@ -3171,6 +4258,8 @@ def handle_send_direct_message_event(data):
 
 @app.errorhandler(400)
 def bad_request(error):
+    if isinstance(error, SecurityError):
+        return 'Bad Request', 400, {'Content-Type': 'text/plain; charset=utf-8'}
     return render_template(
         'error.html',
         title='잘못된 요청',

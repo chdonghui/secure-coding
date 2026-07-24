@@ -34,4 +34,14 @@
 {% else %}
   <p>등록한 상품이 없습니다.</p>
 {% endif %}
+
+<nav aria-label="내 상품 페이지">
+  {% if pagination.has_previous %}
+    <a href="{{ url_for('manage_products', page=pagination.page - 1) }}">이전</a>
+  {% endif %}
+  <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
+  {% if pagination.has_next %}
+    <a href="{{ url_for('manage_products', page=pagination.page + 1) }}">다음</a>
+  {% endif %}
+</nav>
 {% endblock %}

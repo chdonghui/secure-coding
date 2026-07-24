@@ -240,6 +240,7 @@ def test_valid_product_is_normalized_and_stored_as_integer(client):
         ('제목', '   ', '1000'),
         ('제목', 'a' * (market.PRODUCT_DESCRIPTION_MAX_LENGTH + 1), '1000'),
         ('제목', '설명\x00', '1000'),
+        ('제목', '방향\u202e제어', '1000'),
         ('제목', '설명', ''),
         ('제목', '설명', '-1'),
         ('제목', '설명', '1.5'),
@@ -291,6 +292,52 @@ def test_product_output_escapes_script_markup(client):
     assert '&lt;img src=x onerror=alert' in management
     assert '&lt;img src=x onerror=alert' in detail
     assert '&lt;img src=x onerror=alert' in edit
+
+
+def test_product_creation_is_rate_limited_and_catalog_is_paginated(
+    client,
+    monkeypatch,
+):
+    setup_owner(client)
+    monkeypatch.setattr(market, 'PRODUCT_CREATE_RATE_LIMIT', 2)
+    assert create_product(client, title='제한 상품 1').status_code == 302
+    assert create_product(client, title='제한 상품 2').status_code == 302
+    assert create_product(client, title='제한 상품 3').status_code == 429
+
+    connection = sqlite3.connect(market.DATABASE)
+    try:
+        owner_id = connection.execute(
+            'SELECT id FROM user WHERE username = ?',
+            (OWNER_USERNAME,),
+        ).fetchone()[0]
+        for number in range(market.PAGE_SIZE):
+            connection.execute(
+                '''
+                INSERT INTO product (
+                    id,
+                    title,
+                    description,
+                    price,
+                    seller_id
+                )
+                VALUES (?, ?, '페이지 검증 상품', 1000, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    f'추가 상품 {number:02d}',
+                    owner_id,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    first_page = client.get('/products').get_data(as_text=True)
+    second_page = client.get('/products?page=2').get_data(as_text=True)
+    assert '다음' in first_page
+    assert '이전' in second_page
+    assert client.get('/products?page=0').status_code == 400
+    assert client.get('/products?page=9999').status_code == 404
 
 
 def test_owner_can_edit_and_delete_product(client):

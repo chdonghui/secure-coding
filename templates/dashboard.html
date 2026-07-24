@@ -12,6 +12,15 @@
     </li>
   {% endfor %}
 </ul>
+<nav aria-label="대시보드 상품 페이지">
+  {% if pagination.has_previous %}
+    <a href="{{ url_for('dashboard', page=pagination.page - 1) }}">이전</a>
+  {% endif %}
+  <span>{{ pagination.page }} / {{ pagination.total_pages }}</span>
+  {% if pagination.has_next %}
+    <a href="{{ url_for('dashboard', page=pagination.page + 1) }}">다음</a>
+  {% endif %}
+</nav>
 <p><a href="{{ url_for('new_product') }}">새 상품 등록</a></p>
 
 <h3>실시간 채팅</h3>
@@ -25,10 +34,10 @@
     autocomplete="off"
     placeholder="메시지를 입력하세요"
   >
-  <button onclick="sendMessage()">전송</button>
+  <button id="chat_send" type="button">전송</button>
 </div>
 
-<script type="text/javascript">
+<script type="text/javascript" nonce="{{ csp_nonce() }}">
   var socket = io({
     auth: {
       csrf_token: {{ csrf_token()|tojson }}
@@ -59,5 +68,6 @@
       input.value = "";
     }
   }
+  document.getElementById('chat_send').addEventListener('click', sendMessage);
 </script>
 {% endblock %}
