@@ -308,6 +308,14 @@ def add_user_security_columns(cursor):
                 )
             '''
         )
+    if 'account_type' not in columns:
+        cursor.execute(
+            '''
+            ALTER TABLE user
+            ADD COLUMN account_type TEXT NOT NULL DEFAULT 'user'
+                CHECK(account_type IN ('user', 'business'))
+            '''
+        )
 
 
 def migrate_plaintext_passwords(cursor):
@@ -466,6 +474,7 @@ def ensure_purchase_order_schema(cursor):
                     AND product.price = NEW.amount
                     AND seller.username = NEW.seller_username_snapshot
                     AND seller.is_admin = 0
+                    AND seller.account_type IN ('user', 'business')
                     AND seller.deleted_at IS NULL
                     AND NOT EXISTS (
                         SELECT 1
@@ -485,6 +494,7 @@ def ensure_purchase_order_schema(cursor):
                     buyer.id = NEW.buyer_id
                     AND buyer.username = NEW.buyer_username_snapshot
                     AND buyer.is_admin = 0
+                    AND buyer.account_type = 'user'
                     AND buyer.deleted_at IS NULL
                     AND NOT EXISTS (
                         SELECT 1
@@ -685,6 +695,7 @@ def ensure_transfer_schema(cursor):
                 WHERE
                     user.id = NEW.sender_id
                     AND user.is_admin = 0
+                    AND user.account_type = 'user'
                     AND user.username = NEW.sender_username_snapshot
                     AND user.deleted_at IS NULL
                     AND NOT EXISTS (
@@ -699,6 +710,7 @@ def ensure_transfer_schema(cursor):
                 WHERE
                     user.id = NEW.recipient_id
                     AND user.is_admin = 0
+                    AND user.account_type = 'user'
                     AND user.username = NEW.recipient_username_snapshot
                     AND user.deleted_at IS NULL
                     AND NOT EXISTS (
@@ -1016,6 +1028,71 @@ def create_admin_role_audit_table(cursor):
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS admin_role_audit_created
         ON admin_role_audit (created_at DESC, id DESC)
+    """)
+
+
+def create_business_role_audit_table(cursor):
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS business_role_audit (
+            id TEXT PRIMARY KEY,
+            operator_name TEXT NOT NULL
+                CHECK(length(trim(operator_name)) BETWEEN 1 AND 100)
+                CHECK(instr(operator_name, char(0)) = 0),
+            target_user_id TEXT NOT NULL,
+            target_username_snapshot TEXT NOT NULL,
+            action_type TEXT NOT NULL
+                CHECK(action_type IN ('business_granted', 'business_revoked')),
+            reason TEXT NOT NULL
+                CHECK(length(trim(reason)) BETWEEN
+                    {MODERATION_REASON_MIN_LENGTH} AND
+                    {MODERATION_REASON_MAX_LENGTH})
+                CHECK(instr(reason, char(0)) = 0),
+            created_at INTEGER NOT NULL
+                CHECK(typeof(created_at) = 'integer' AND created_at >= 0),
+            FOREIGN KEY (target_user_id) REFERENCES user(id) ON DELETE RESTRICT
+        )
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS validate_business_role_audit_snapshot
+        BEFORE INSERT ON business_role_audit
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM user
+            WHERE
+                user.id = NEW.target_user_id
+                AND user.username = NEW.target_username_snapshot
+                AND (
+                    (
+                        NEW.action_type = 'business_granted'
+                        AND user.account_type = 'business'
+                    )
+                    OR (
+                        NEW.action_type = 'business_revoked'
+                        AND user.account_type = 'user'
+                    )
+                )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid business role audit snapshot');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_business_role_audit_update
+        BEFORE UPDATE ON business_role_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'business role audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS prevent_business_role_audit_delete
+        BEFORE DELETE ON business_role_audit
+        BEGIN
+            SELECT RAISE(ABORT, 'business role audit log is append-only');
+        END
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS business_role_audit_created
+        ON business_role_audit (created_at DESC, id DESC)
     """)
 
 
@@ -2131,6 +2208,8 @@ def init_db():
                         typeof(is_admin) = 'integer'
                         AND is_admin IN (0, 1)
                     ),
+                account_type TEXT NOT NULL DEFAULT 'user'
+                    CHECK(account_type IN ('user', 'business')),
                 deleted_at INTEGER
                     CHECK(
                         deleted_at IS NULL
@@ -2149,6 +2228,7 @@ def init_db():
         ensure_product_indexes(cursor)
         ensure_moderation_schema(cursor)
         create_admin_role_audit_table(cursor)
+        create_business_role_audit_table(cursor)
         ensure_transfer_schema(cursor)
         ensure_purchase_order_schema(cursor)
         ensure_direct_message_schema(cursor)
@@ -3306,7 +3386,7 @@ def dashboard():
 @app.route('/transfers', methods=['GET', 'POST'])
 @login_required
 def transfers():
-    if g.current_user['is_admin'] == 1:
+    if g.current_user['is_admin'] == 1 or g.current_user['account_type'] != 'user':
         abort(403)
     if request.method == 'POST':
         return create_transfer()
@@ -3321,6 +3401,7 @@ def transfers():
         WHERE
             id <> ?
             AND is_admin = 0
+            AND account_type = 'user'
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3379,7 +3460,7 @@ def transfers():
 
 @csrf_protected
 def create_transfer():
-    if g.current_user['is_admin'] == 1:
+    if g.current_user['is_admin'] == 1 or g.current_user['account_type'] != 'user':
         abort(403)
     request_id = normalize_uuid_identifier(
         request.form.get('request_id', '')
@@ -3407,6 +3488,7 @@ def create_transfer():
             username = ?
             AND id <> ?
             AND is_admin = 0
+            AND account_type = 'user'
             AND deleted_at IS NULL
             AND NOT EXISTS (
                 SELECT 1
@@ -3457,6 +3539,7 @@ def create_transfer():
                 id = ?
                 AND username = ?
                 AND is_admin = 0
+                AND account_type = 'user'
                 AND deleted_at IS NULL
                 AND NOT EXISTS (
                     SELECT 1
@@ -3803,7 +3886,11 @@ def view_product(product_id):
         (product['id'],),
     ).fetchone()
     balance = None
-    if g.current_user is not None and g.current_user['is_admin'] == 0:
+    if (
+        g.current_user is not None
+        and g.current_user['is_admin'] == 0
+        and g.current_user['account_type'] == 'user'
+    ):
         balance = get_wallet_balance(db, g.current_user['id'])
     return render_template(
         'view_product.html',
@@ -3818,7 +3905,7 @@ def view_product(product_id):
 @login_required
 @csrf_protected
 def purchase_product(product_id):
-    if g.current_user['is_admin'] == 1:
+    if g.current_user['is_admin'] == 1 or g.current_user['account_type'] != 'user':
         abort(403)
     if not verify_sensitive_password(
         request.form.get('current_password', '')
@@ -4171,6 +4258,7 @@ def admin_dashboard():
             user.id,
             user.username,
             user.is_admin,
+            user.account_type,
             user_dormancy.created_at AS dormant_at,
             user_dormancy.reason AS dormant_reason,
             COALESCE(report_counts.report_count, 0) AS report_count
@@ -4253,6 +4341,84 @@ def admin_dashboard():
         report_pagination=report_pagination,
         audit_pagination=audit_pagination,
     )
+
+
+@app.route('/admin/users/<user_id>/business', methods=['POST'])
+@admin_required
+@csrf_protected
+def admin_set_business_role(user_id):
+    normalized_user_id = normalize_uuid_identifier(user_id)
+    if normalized_user_id is None:
+        abort(404)
+    action = request.form.get('action', '').strip().lower()
+    if action not in {'grant', 'revoke'}:
+        abort(400)
+    reason, validation_error = validate_moderation_reason(
+        request.form.get('reason', '')
+    )
+    if validation_error:
+        flash(validation_error)
+        return redirect(url_for('admin_dashboard'))
+    if not enforce_admin_action_authorization():
+        return redirect(url_for('admin_dashboard'))
+
+    db = get_db()
+    target = db.execute(
+        '''
+        SELECT id, username, is_admin, account_type, session_version
+        FROM user
+        WHERE id = ? AND deleted_at IS NULL
+        ''',
+        (normalized_user_id,),
+    ).fetchone()
+    if target is None:
+        abort(404)
+    if target['is_admin'] == 1 or target['id'] == g.current_user['id']:
+        abort(403)
+    granting = action == 'grant'
+    if target['account_type'] == ('business' if granting else 'user'):
+        flash('사용자가 이미 요청한 사업자 역할 상태입니다.')
+        return redirect(url_for('admin_dashboard'))
+    if granting and db.execute(
+        'SELECT 1 FROM user_dormancy WHERE user_id = ?', (target['id'],)
+    ).fetchone() is not None:
+        flash('휴면 사용자는 사업자로 지정할 수 없습니다.')
+        return redirect(url_for('admin_dashboard'))
+    if get_wallet_balance(db, target['id']) != 0:
+        flash('사업자 역할을 변경하려면 학습용 잔액이 0원이어야 합니다.')
+        return redirect(url_for('admin_dashboard'))
+
+    now = int(time.time())
+    try:
+        db.execute(
+            '''
+            UPDATE user
+            SET account_type = ?, session_version = session_version + 1
+            WHERE id = ? AND account_type = ?
+            ''',
+            ('business' if granting else 'user', target['id'],
+             'user' if granting else 'business'),
+        )
+        db.execute(
+            '''
+            INSERT INTO business_role_audit (
+                id, operator_name, target_user_id, target_username_snapshot,
+                action_type, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                str(uuid.uuid4()), g.current_user['username'], target['id'],
+                target['username'], 'business_granted' if granting else 'business_revoked',
+                reason, now,
+            ),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        abort(400)
+    disconnect_user_sockets(target['id'])
+    flash('사업자 권한을 부여했습니다.' if granting else '사업자 권한을 해제했습니다.')
+    return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/moderation')

@@ -15,6 +15,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ADMIN_USERNAME = 'quick_admin'
 USER_USERNAME = 'user1'
 RECIPIENT_USERNAME = 'user2'
+BUSINESS_USERNAME = 'business_demo'
 DEMO_WALLET_BALANCE = 100_000
 
 
@@ -44,11 +45,13 @@ def seed_demo_database(market):
     admin_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
     recipient_id = str(uuid.uuid4())
+    business_id = str(uuid.uuid4())
     apple_product_id = str(uuid.uuid4())
     banana_product_id = str(uuid.uuid4())
     admin_password = generate_temporary_password()
     user_password = generate_temporary_password()
     recipient_password = generate_temporary_password()
+    business_password = generate_temporary_password()
     created_at = int(time.time())
 
     connection = sqlite3.connect(market.DATABASE)
@@ -85,6 +88,17 @@ def seed_demo_database(market):
                 recipient_id,
                 RECIPIENT_USERNAME,
                 market.password_hasher.hash(recipient_password),
+            ),
+        )
+        connection.execute(
+            '''
+            INSERT INTO user (id, username, password, is_admin, account_type)
+            VALUES (?, ?, ?, 0, 'business')
+            ''',
+            (
+                business_id,
+                BUSINESS_USERNAME,
+                market.password_hasher.hash(business_password),
             ),
         )
         for wallet_user_id in (user_id, recipient_id):
@@ -151,7 +165,7 @@ def seed_demo_database(market):
                 '바나나 한 송이',
                 '송금과 상품 목록을 확인하기 위한 테스트용 바나나입니다.',
                 5000,
-                recipient_id,
+                business_id,
             ),
         )
         report_targets = (
@@ -225,6 +239,8 @@ def seed_demo_database(market):
         'user_password': user_password,
         'recipient_username': RECIPIENT_USERNAME,
         'recipient_password': recipient_password,
+        'business_username': BUSINESS_USERNAME,
+        'business_password': business_password,
         'wallet_balance': DEMO_WALLET_BALANCE,
         'apple_product_id': apple_product_id,
         'banana_product_id': banana_product_id,
@@ -269,6 +285,10 @@ def main():
         print(
             f'일반 사용자 2 계정: {accounts["recipient_username"]} / '
             f'{accounts["recipient_password"]}'
+        )
+        print(
+            f'사업자 계정(판매 전용): {accounts["business_username"]} / '
+            f'{accounts["business_password"]}'
         )
         print(
             f'두 일반 계정의 학습용 송금 잔액: '

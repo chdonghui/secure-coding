@@ -141,8 +141,10 @@
       <a href="{{ url_for('dashboard') }}">대시보드</a>
       <a href="{{ url_for('profile') }}">마이페이지</a>
       <a href="{{ url_for('manage_products') }}">내 상품 관리</a>
-      {% if g.current_user and g.current_user.is_admin == 0 %}
+      {% if g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'user' %}
         <a href="{{ url_for('transfers') }}">송금</a>
+      {% endif %}
+      {% if g.current_user and g.current_user.is_admin == 0 %}
         <a href="{{ url_for('orders') }}">주문 내역</a>
       {% endif %}
       <a href="{{ url_for('direct_chat_users') }}">1대1 채팅</a>

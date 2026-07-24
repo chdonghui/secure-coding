@@ -27,6 +27,11 @@ def open_database(database_path):
         raise ValueError(
             '관리자 스키마가 없습니다. 먼저 Version 3.1 애플리케이션을 실행하세요.'
         )
+    if 'account_type' not in columns:
+        connection.close()
+        raise ValueError(
+            '사업자 계정 스키마가 없습니다. 먼저 Version 6.0 애플리케이션을 실행하세요.'
+        )
     role_audit_table = connection.execute(
         '''
         SELECT 1
@@ -41,6 +46,68 @@ def open_database(database_path):
             '먼저 Version 3.1 애플리케이션을 실행하세요.'
         )
     return connection
+
+
+def list_businesses(connection):
+    return connection.execute(
+        '''
+        SELECT id, username
+        FROM user
+        WHERE account_type = 'business' AND is_admin = 0 AND deleted_at IS NULL
+        ORDER BY username, id
+        '''
+    ).fetchall()
+
+
+def set_business_role(connection, username, grant, operator_name=None,
+                      reason=DEFAULT_ROLE_CHANGE_REASON):
+    operator_name = (operator_name or getpass.getuser()).strip()
+    reason = unicodedata.normalize('NFKC', reason.strip())
+    if not 1 <= len(operator_name) <= 100:
+        raise ValueError('운영자 식별자는 1~100자여야 합니다.')
+    if not 10 <= len(reason) <= 500:
+        raise ValueError('역할 변경 사유는 10~500자여야 합니다.')
+    user = connection.execute(
+        '''SELECT id, username, is_admin, account_type, deleted_at,
+                  (SELECT 1 FROM user_dormancy d WHERE d.user_id = user.id) AS dormant
+           FROM user WHERE username = ?''', (username,)
+    ).fetchone()
+    if user is None or user['deleted_at'] is not None:
+        raise ValueError('활성 사용자를 찾을 수 없습니다.')
+    if user['is_admin'] == 1 or user['dormant']:
+        raise ValueError('관리자 또는 휴면 사용자의 사업자 역할은 변경할 수 없습니다.')
+    requested = 'business' if grant else 'user'
+    if user['account_type'] == requested:
+        raise ValueError('사용자가 이미 요청한 사업자 역할 상태입니다.')
+    balance = connection.execute(
+        '''SELECT COALESCE(SUM(amount), 0) FROM wallet_adjustment WHERE user_id = ?''',
+        (user['id'],),
+    ).fetchone()[0]
+    balance += connection.execute(
+        '''SELECT COALESCE(SUM(CASE WHEN recipient_id = ? THEN amount ELSE -amount END), 0)
+           FROM money_transfer WHERE sender_id = ? OR recipient_id = ?''',
+        (user['id'], user['id'], user['id']),
+    ).fetchone()[0]
+    if balance != 0:
+        raise ValueError('사업자 역할을 변경하려면 잔액이 0원이어야 합니다.')
+    try:
+        connection.execute(
+            'UPDATE user SET account_type = ?, session_version = session_version + 1 WHERE id = ?',
+            (requested, user['id']),
+        )
+        connection.execute(
+            '''INSERT INTO business_role_audit
+               (id, operator_name, target_user_id, target_username_snapshot,
+                action_type, reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (str(uuid.uuid4()), operator_name, user['id'], user['username'],
+             'business_granted' if grant else 'business_revoked', reason, int(time.time())),
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    return user
 
 
 def list_admins(connection):
@@ -148,7 +215,13 @@ def parse_args():
     parser.add_argument('--database', default='market.db')
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('list')
+    subparsers.add_parser('list-businesses')
     for command in ('grant', 'revoke'):
+        role_parser = subparsers.add_parser(command)
+        role_parser.add_argument('--username', required=True)
+        role_parser.add_argument('--reason', required=True)
+        role_parser.add_argument('--operator')
+    for command in ('business-grant', 'business-revoke'):
         role_parser = subparsers.add_parser(command)
         role_parser.add_argument('--username', required=True)
         role_parser.add_argument('--reason', required=True)
@@ -164,6 +237,18 @@ def main():
             if args.command == 'list':
                 for admin in list_admins(connection):
                     print(f'{admin["username"]}\t{admin["id"]}')
+                return 0
+            if args.command == 'list-businesses':
+                for business in list_businesses(connection):
+                    print(f'{business["username"]}\t{business["id"]}')
+                return 0
+            if args.command.startswith('business-'):
+                user = set_business_role(
+                    connection, args.username,
+                    grant=args.command == 'business-grant',
+                    operator_name=args.operator, reason=args.reason,
+                )
+                print(f'{user["username"]}: 사업자 역할 변경 완료')
                 return 0
             user = set_admin_role(
                 connection,

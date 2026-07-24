@@ -29,17 +29,19 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
         users = {
             row['username']: row
             for row in connection.execute(
-                'SELECT id, username, password, is_admin FROM user'
+                'SELECT id, username, password, is_admin, account_type FROM user'
             ).fetchall()
         }
         assert set(users) == {
             quickstart_demo.ADMIN_USERNAME,
             quickstart_demo.USER_USERNAME,
             quickstart_demo.RECIPIENT_USERNAME,
+            quickstart_demo.BUSINESS_USERNAME,
         }
         assert users[accounts['admin_username']]['is_admin'] == 1
         assert users[accounts['user_username']]['is_admin'] == 0
         assert users[accounts['recipient_username']]['is_admin'] == 0
+        assert users[accounts['business_username']]['account_type'] == 'business'
         assert market.password_hasher.verify(
             users[accounts['admin_username']]['password'],
             accounts['admin_password'],
@@ -51,6 +53,10 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
         assert market.password_hasher.verify(
             users[accounts['recipient_username']]['password'],
             accounts['recipient_password'],
+        )
+        assert market.password_hasher.verify(
+            users[accounts['business_username']]['password'],
+            accounts['business_password'],
         )
         assert connection.execute(
             'SELECT COUNT(*) FROM wallet_adjustment'
@@ -66,6 +72,9 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
         assert market.get_wallet_balance(
             connection,
             users[accounts['admin_username']]['id'],
+        ) == 0
+        assert market.get_wallet_balance(
+            connection, users[accounts['business_username']]['id']
         ) == 0
         products = {
             row['title']: row
@@ -83,9 +92,7 @@ def test_quickstart_demo_uses_isolated_database_and_seeds_accounts(
             accounts['user_username']
         )
         assert products['바나나 한 송이']['price'] == 5000
-        assert products['바나나 한 송이']['username'] == (
-            accounts['recipient_username']
-        )
+        assert products['바나나 한 송이']['username'] == accounts['business_username']
         assert connection.execute(
             'SELECT COUNT(*) FROM report'
         ).fetchone()[0] == 2

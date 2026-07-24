@@ -112,7 +112,16 @@
             <button type="submit">휴면 해제</button>
           </form>
         {% else %}
-          <p>상태: 활성</p>
+          <p>상태: 활성 · {% if managed_user.account_type == 'business' %}사업자{% else %}일반 사용자{% endif %}</p>
+          {% if managed_user.account_type == 'business' %}
+            <form method="post" action="{{ url_for('admin_set_business_role', user_id=managed_user.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="revoke">
+              <textarea name="reason" minlength="10" maxlength="500" required placeholder="사업자 권한 해제 사유"></textarea>
+              <input type="password" name="current_password" maxlength="128" autocomplete="current-password" required>
+              <button type="submit">사업자 권한 해제</button>
+            </form>
+          {% else %}
           <form
             method="post"
             action="{{ url_for(
@@ -138,6 +147,14 @@
             >
             <button type="submit">불량 사용자 휴면</button>
           </form>
+            <form method="post" action="{{ url_for('admin_set_business_role', user_id=managed_user.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="action" value="grant">
+              <textarea name="reason" minlength="10" maxlength="500" required placeholder="사업자 권한 부여 사유"></textarea>
+              <input type="password" name="current_password" maxlength="128" autocomplete="current-password" required>
+              <button type="submit">사업자 권한 부여</button>
+            </form>
+          {% endif %}
         {% endif %}
       </li>
     {% endfor %}

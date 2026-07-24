@@ -14,7 +14,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit">상품 삭제</button>
   </form>
-{% elif g.current_user and g.current_user.is_admin == 0 and seller and product.price >= 1 %}
+{% elif g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'user' and seller and product.price >= 1 %}
   <p>현재 학습용 잔액: {{ "{:,}".format(balance) }}원</p>
   <form
     method="post"
@@ -32,8 +32,10 @@
     >
     <button type="submit">학습용 잔액으로 구매</button>
   </form>
-{% elif g.current_user and g.current_user.is_admin == 0 and seller %}
+{% elif g.current_user and g.current_user.is_admin == 0 and g.current_user.account_type == 'user' and seller %}
   <p>무료 상품은 학습용 결제 기능으로 구매할 수 없습니다.</p>
+{% elif g.current_user and g.current_user.account_type == 'business' and seller %}
+  <p>사업자 계정은 상품을 구매할 수 없습니다.</p>
 {% elif not g.current_user %}
   <p><a href="{{ url_for('login') }}">로그인</a> 후 구매할 수 있습니다.</p>
 {% endif %}
